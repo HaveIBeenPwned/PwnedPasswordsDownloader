@@ -41,6 +41,4 @@ jobs:
       run: dotnet pack ./src/HaveIBeenPwned.PwnedPasswords.Downloader/HaveIBeenPwned.PwnedPasswords.Downloader.csproj --configuration Release
 
     - name: Publish Nuget to GitHub registry
-      run: dotnet nuget push ./src/HaveIBeenPwned.PwnedPasswords.Downloader/nupkg/*.nupkg -k ${GITHUB_TOKEN} -s https://nuget.pkg.github.com/haveibeenpwned/index.json --skip-duplicate --no-symbols 
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: dotnet nuget push ./src/HaveIBeenPwned.PwnedPasswords.Downloader/nupkg/*.nupkg -k ${{ secrets.NUGET_TOKEN }} --source https://api.nuget.org/v3/index.json --skip-duplicate --no-symbols 
