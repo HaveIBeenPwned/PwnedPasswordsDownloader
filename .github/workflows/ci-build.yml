@@ -1,0 +1,43 @@
+name: 'Continuous Integration Build'
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: "Build Project"
+    runs-on: ubuntu-latest
+
+    env:
+      MajorVersion: 0
+      MinorVersion: 1
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Get current date
+      id: version
+      run: echo "::set-output name=date::$(date +'%Y%m.%d')"
+
+    - name: Get branch name (merge)
+      if: github.event_name != 'pull_request'
+      run: echo "Branch=$(echo ${GITHUB_REF#refs/heads/} | tr / -)" >> $GITHUB_ENV
+
+    - name: Get branch name (pull request)
+      if: github.event_name == 'pull_request'
+      run: echo "Branch=$(echo ${GITHUB_HEAD_REF} | tr / -)" >> $GITHUB_ENV
+
+    - name: Set Version Prefix
+      env:
+        VERPREF: ${{ format('{0}.{1}.{2}{3}', env.MajorVersion, env.MinorVersion, steps.date.outputs.date, github.run_number) }}
+      run: echo "VersionPrefix=$(echo ${VERPREF})" >> $GITHUB_ENV
+    
+    - name: Setup .NET 6.0 SDK
+      uses: actions/setup-dotnet@v1
+      with:
+        dotnet-version: 6.x
+
+    - name: Build Project
+      run: dotnet pack --configuration Release
