@@ -40,4 +40,4 @@ jobs:
         dotnet-version: 6.x
 
     - name: Build Project
-      run: dotnet pack --configuration Release
+      run: dotnet pack ./src/HaveIBeenPwned.PwnedPasswords.Downloader/HaveIBeenPwned.PwnedPasswords.Downloader.csproj --configuration Release
