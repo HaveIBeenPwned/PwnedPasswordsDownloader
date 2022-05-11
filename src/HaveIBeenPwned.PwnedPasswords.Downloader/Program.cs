@@ -1,4 +1,5 @@
-﻿using System.Buffers.Binary;
+﻿using System.Buffers;
+using System.Buffers.Binary;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
@@ -9,6 +10,8 @@ using System.Text;
 using System.Threading.Channels;
 
 using HaveIBeenPwned.PwnedPasswords;
+
+using Microsoft.Win32.SafeHandles;
 
 using Polly;
 using Polly.Extensions.Http;
@@ -210,20 +213,31 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
         if (settings.SingleFile)
         {
             Channel<Task<Stream>> downloadTasks = Channel.CreateBounded<Task<Stream>>(new BoundedChannelOptions(settings.Parallelism) { SingleReader = true, SingleWriter = true });
-            using var file = new FileStream($"{settings.OutputFile}.txt", FileMode.Append, FileAccess.Write, FileShare.None, 4096, true);
-
+            using var fileHandle = File.OpenHandle($"{settings.OutputFile}.txt", FileMode.OpenOrCreate, FileAccess.Write, FileShare.None, FileOptions.Asynchronous);
             Task producerTask = StartDownloads(downloadTasks.Writer);
+            int offset = 0;
+            Memory<byte> buffer = new byte[32768].AsMemory();
             await foreach (Task<Stream> item in downloadTasks.Reader.ReadAllAsync().ConfigureAwait(false))
             {
                 string prefix = GetHashRange(_statistics.HashesDownloaded++);
                 using Stream inputStream = await item.ConfigureAwait(false);
-                using var writer = new StreamWriter(file, leaveOpen: true);
+                int bytesWritten = 0;
                 await foreach (string line in inputStream.ParseLinesAsync().ConfigureAwait(false))
                 {
-                    await writer.WriteLineAsync($"{prefix}{line}");
+                    bytesWritten += Encoding.UTF8.GetBytes($"{prefix}{line}{Environment.NewLine}", buffer.Span.Slice(bytesWritten));
+                    if (bytesWritten > (buffer.Length - 4096))
+                    {
+                        await RandomAccess.WriteAsync(fileHandle, buffer.Slice(0, bytesWritten), offset).ConfigureAwait(false);
+                        offset += bytesWritten;
+                        bytesWritten = 0;
+                    }
                 }
 
-                await writer.FlushAsync().ConfigureAwait(false);
+                if (bytesWritten > 0)
+                {
+                    await RandomAccess.WriteAsync(fileHandle, buffer.Slice(0, bytesWritten), offset).ConfigureAwait(false);
+                    offset += bytesWritten;
+                }
             }
 
             await producerTask.ConfigureAwait(false);
@@ -244,7 +258,11 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
     {
         for (int i = 0; i < 1024 * 1024; i++)
         {
-            await channelWriter.WriteAsync(GetPwnedPasswordsRangeFromWeb(i)).ConfigureAwait(false);
+            var task = GetPwnedPasswordsRangeFromWeb(i);
+            if (!channelWriter.TryWrite(task))
+            {
+                await channelWriter.WriteAsync(task).ConfigureAwait(false);
+            }
         }
 
         channelWriter.Complete();
@@ -252,17 +270,32 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
 
     private async Task DownloadRangeToFile(string outputDirectory)
     {
-        int nextHash = Interlocked.Increment(ref _hashesInProgress);
-        int currentHash = nextHash - 1;
-        while (currentHash < 1024 * 1024)
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(32768);
+        Memory<byte> memoryBuffer = buffer.AsMemory();
+        try
         {
-            using Stream stream = await GetPwnedPasswordsRangeFromWeb(currentHash).ConfigureAwait(false);
-            using var file = new FileStream(Path.Combine(outputDirectory, $"{GetHashRange(currentHash)}.txt"), FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024, true);
-            await stream.CopyToAsync(file).ConfigureAwait(false);
-            await file.FlushAsync().ConfigureAwait(false);
-            Interlocked.Increment(ref _statistics.HashesDownloaded);
-            nextHash = Interlocked.Increment(ref _hashesInProgress);
-            currentHash = nextHash - 1;
+            int nextHash = Interlocked.Increment(ref _hashesInProgress);
+            int currentHash = nextHash - 1;
+            while (currentHash < 1024 * 1024)
+            {
+                using Stream stream = await GetPwnedPasswordsRangeFromWeb(currentHash).ConfigureAwait(false);
+                using var fileHandle = File.OpenHandle(Path.Combine(outputDirectory, $"{GetHashRange(currentHash)}.txt"), FileMode.Create, FileAccess.Write, FileShare.None, FileOptions.Asynchronous);
+                int bytesRead = await stream.ReadAsync(memoryBuffer).ConfigureAwait(false);
+                int offset = 0;
+                do
+                {
+                    await RandomAccess.WriteAsync(fileHandle, memoryBuffer.Slice(0, bytesRead), offset).ConfigureAwait(false);
+                    offset += bytesRead;
+                }
+                while ((bytesRead = await stream.ReadAsync(memoryBuffer).ConfigureAwait(false)) > 0);
+                Interlocked.Increment(ref _statistics.HashesDownloaded);
+                nextHash = Interlocked.Increment(ref _hashesInProgress);
+                currentHash = nextHash - 1;
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 }
