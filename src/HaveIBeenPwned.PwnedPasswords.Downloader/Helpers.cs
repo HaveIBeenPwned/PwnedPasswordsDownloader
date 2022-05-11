@@ -11,7 +11,7 @@ namespace HaveIBeenPwned.PwnedPasswords
     internal static class Helpers
     {
         private static readonly Encoding s_encoding = Encoding.UTF8;
-        private static ConcurrentStack<Pipe> s_pipes = new ConcurrentStack<Pipe>();
+        private static readonly ConcurrentStack<Pipe> s_pipes = new();
 
         private static Pipe GetPipe()
         {
@@ -85,7 +85,7 @@ namespace HaveIBeenPwned.PwnedPasswords
 
         internal static async IAsyncEnumerable<string> ParseLinesAsync<T>(this T stream) where T : Stream
         {
-            var inputPipe = GetPipe();
+            Pipe inputPipe = GetPipe();
             Task copyTask = stream.CopyToAsync(inputPipe.Writer).ContinueWith(CompleteWriter, inputPipe.Writer).Unwrap();
 
             await foreach (string line in inputPipe.Reader.ReadLinesAsync())

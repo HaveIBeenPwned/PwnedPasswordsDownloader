@@ -256,7 +256,7 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
         int currentHash = nextHash - 1;
         while (currentHash < 1024 * 1024)
         {
-            using var stream = await GetPwnedPasswordsRangeFromWeb(currentHash).ConfigureAwait(false);
+            using Stream stream = await GetPwnedPasswordsRangeFromWeb(currentHash).ConfigureAwait(false);
             using var file = new FileStream(Path.Combine(outputDirectory, $"{GetHashRange(currentHash)}.txt"), FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024, true);
             await stream.CopyToAsync(file).ConfigureAwait(false);
             await file.FlushAsync().ConfigureAwait(false);
