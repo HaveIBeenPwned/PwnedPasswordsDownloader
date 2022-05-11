@@ -213,9 +213,9 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
         if (settings.SingleFile)
         {
             Channel<Task<Stream>> downloadTasks = Channel.CreateBounded<Task<Stream>>(new BoundedChannelOptions(settings.Parallelism) { SingleReader = true, SingleWriter = true });
-            using var fileHandle = File.OpenHandle($"{settings.OutputFile}.txt", FileMode.OpenOrCreate, FileAccess.Write, FileShare.None, FileOptions.Asynchronous);
+            using SafeFileHandle fileHandle = File.OpenHandle($"{settings.OutputFile}.txt", FileMode.OpenOrCreate, FileAccess.Write, FileShare.None, FileOptions.Asynchronous);
             Task producerTask = StartDownloads(downloadTasks.Writer);
-            int offset = 0;
+            long offset = 0;
             Memory<byte> buffer = new byte[32768].AsMemory();
             await foreach (Task<Stream> item in downloadTasks.Reader.ReadAllAsync().ConfigureAwait(false))
             {
@@ -258,7 +258,7 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
     {
         for (int i = 0; i < 1024 * 1024; i++)
         {
-            var task = GetPwnedPasswordsRangeFromWeb(i);
+            Task<Stream> task = GetPwnedPasswordsRangeFromWeb(i);
             if (!channelWriter.TryWrite(task))
             {
                 await channelWriter.WriteAsync(task).ConfigureAwait(false);
@@ -279,9 +279,9 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
             while (currentHash < 1024 * 1024)
             {
                 using Stream stream = await GetPwnedPasswordsRangeFromWeb(currentHash).ConfigureAwait(false);
-                using var fileHandle = File.OpenHandle(Path.Combine(outputDirectory, $"{GetHashRange(currentHash)}.txt"), FileMode.Create, FileAccess.Write, FileShare.None, FileOptions.Asynchronous);
+                using SafeFileHandle fileHandle = File.OpenHandle(Path.Combine(outputDirectory, $"{GetHashRange(currentHash)}.txt"), FileMode.Create, FileAccess.Write, FileShare.None, FileOptions.Asynchronous);
                 int bytesRead = await stream.ReadAsync(memoryBuffer).ConfigureAwait(false);
-                int offset = 0;
+                long offset = 0;
                 do
                 {
                     await RandomAccess.WriteAsync(fileHandle, memoryBuffer.Slice(0, bytesRead), offset).ConfigureAwait(false);
