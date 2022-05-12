@@ -61,7 +61,7 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
         [CommandArgument(0, "[outputFile]")]
         public string OutputFile { get; init; } = "pwnedpasswords";
 
-        [Description("The number of parallel requests to make to HaveIBeenPwned to download the hash ranges. If omitted or less than 2, defaults to the number of processors on the machine.")]
+        [Description("The number of parallel requests to make to Have I Been Pwned to download the hash ranges. If omitted or less than 2, defaults to the number of processors on the machine.")]
         [CommandOption("-p||--parallelism")]
         [DefaultValue(0)]
         public int Parallelism { get; set; } = 0;
@@ -148,7 +148,7 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
 
         processingTask.Wait();
         AnsiConsole.MarkupLine($"Finished downloading all hash ranges in {_statistics.ElapsedMilliseconds:N0}ms ({_statistics.HashesPerSecond:N2} hashes per second).");
-        AnsiConsole.MarkupLine($"We made {_statistics.CloudflareRequests:N0} Cloudflare requests (avg response time: {(double)_statistics.CloudflareRequestTimeTotal / _statistics.CloudflareRequests:N2}ms). Of those, Cloudflare had already cached {_statistics.CloudflareHits:N0} requests, and made {_statistics.CloudflareMisses:N0} requests to the HaveIBeenPwned origin server.");
+        AnsiConsole.MarkupLine($"We made {_statistics.CloudflareRequests:N0} Cloudflare requests (avg response time: {(double)_statistics.CloudflareRequestTimeTotal / _statistics.CloudflareRequests:N2}ms). Of those, Cloudflare had already cached {_statistics.CloudflareHits:N0} requests, and made {_statistics.CloudflareMisses:N0} requests to the Have I Been Pwned origin server.");
 
         return 0;
     }
