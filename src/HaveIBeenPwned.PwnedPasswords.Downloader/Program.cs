@@ -88,6 +88,11 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
         [CommandOption("-s|--single")]
         [DefaultValue(true)]
         public bool SingleFile { get; set; } = true;
+
+        [Description("When set, fetches NTLM hashes instead of SHA1.")]
+        [CommandOption("-n|--ntlm")]
+        [DefaultValue(false)]
+        public bool FetchNtlm { get; set; } = false;
     }
 
     public override int Execute([NotNull] CommandContext context, [NotNull] Settings settings)
@@ -191,10 +196,15 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
         return client;
     }
 
-    private async Task<Stream> GetPwnedPasswordsRangeFromWeb(int i)
+    private async Task<Stream> GetPwnedPasswordsRangeFromWeb(int i, bool fetchNtlm)
     {
         var cloudflareTimer = Stopwatch.StartNew();
         string requestUri = GetHashRange(i);
+        if (fetchNtlm)
+        {
+            requestUri += "?mode=ntlm";
+        }
+
         HttpResponseMessage response = await _policy.ExecuteAsync(() =>
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
@@ -233,7 +243,7 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
             Channel<Task<Stream>> downloadTasks = Channel.CreateBounded<Task<Stream>>(new BoundedChannelOptions(settings.Parallelism) { SingleReader = true, SingleWriter = true, AllowSynchronousContinuations = true });
             using FileStream file = File.Open($"{settings.OutputFile}.txt", new FileStreamOptions { Access = FileAccess.Write, BufferSize = 32767, Mode = FileMode.Create, Options = FileOptions.Asynchronous, Share = FileShare.None });
             using StreamWriter writer = new(file);
-            Task producerTask = StartDownloads(downloadTasks.Writer);
+            Task producerTask = StartDownloads(downloadTasks.Writer, settings.FetchNtlm);
             await foreach (Task<Stream> item in downloadTasks.Reader.ReadAllAsync().ConfigureAwait(false))
             {
                 string prefix = GetHashRange(_statistics.HashesDownloaded++);
@@ -258,20 +268,20 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
             Task[] downloadTasks = new Task[settings.Parallelism];
             for (int i = 0; i < downloadTasks.Length; i++)
             {
-                downloadTasks[i] = DownloadRangeToFile(settings.OutputFile);
+                downloadTasks[i] = DownloadRangeToFile(settings.OutputFile, settings.FetchNtlm);
             }
 
             await Task.WhenAll(downloadTasks).ConfigureAwait(false);
         }
     }
 
-    private async Task StartDownloads(ChannelWriter<Task<Stream>> channelWriter)
+    private async Task StartDownloads(ChannelWriter<Task<Stream>> channelWriter, bool fetchNtlm)
     {
         try
         {
             for (int i = 0; i < 1024 * 1024; i++)
             {
-                await channelWriter.WriteAsync(GetPwnedPasswordsRangeFromWeb(i));
+                await channelWriter.WriteAsync(GetPwnedPasswordsRangeFromWeb(i, fetchNtlm));
             }
 
             channelWriter.TryComplete();
@@ -282,13 +292,13 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
         }
     }
 
-    private async Task DownloadRangeToFile(string outputDirectory)
+    private async Task DownloadRangeToFile(string outputDirectory, bool fetchNtlm)
     {
         int nextHash = Interlocked.Increment(ref _hashesInProgress);
         int currentHash = nextHash - 1;
         while (currentHash < 1024 * 1024)
         {
-            using Stream stream = await GetPwnedPasswordsRangeFromWeb(currentHash).ConfigureAwait(false);
+            using Stream stream = await GetPwnedPasswordsRangeFromWeb(currentHash, fetchNtlm).ConfigureAwait(false);
             using SafeFileHandle handle = File.OpenHandle(Path.Combine(outputDirectory, $"{GetHashRange(currentHash)}.txt"), FileMode.Create, FileAccess.Write, FileShare.None, FileOptions.Asynchronous);
             await handle.CopyFrom(stream).ConfigureAwait(false);
             Interlocked.Increment(ref _statistics.HashesDownloaded);
