@@ -84,7 +84,7 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
         [DefaultValue(false)]
         public bool Overwrite { get; set; } = false;
 
-        [Description("When set, writes the hash ranges into a single .txt file. Otherwise downloads ranges to individual files into a subfolder.")]
+        [Description("When set, writes the hash ranges into a single .txt file. Otherwise downloads ranges to individual files into a subfolder. If ommited defaults to single file.")]
         [CommandOption("-s|--single")]
         [DefaultValue(true)]
         public bool SingleFile { get; set; } = true;
@@ -158,7 +158,7 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
                 }
                 while (!processTask.IsCompleted);
 
-                if(processTask.Exception is not null && processTask.Exception.InnerException is not null)
+                if (processTask.Exception is not null && processTask.Exception.InnerException is not null)
                 {
                     AnsiConsole.WriteException(processTask.Exception.InnerException);
                 }
@@ -250,7 +250,7 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
                 using Stream inputStream = await item.ConfigureAwait(false);
                 using StreamReader reader = new StreamReader(inputStream);
                 string? line = null;
-                while((line = await reader.ReadLineAsync()) != null)
+                while ((line = await reader.ReadLineAsync()) != null)
                 {
                     if (line.Length > 0)
                     {
