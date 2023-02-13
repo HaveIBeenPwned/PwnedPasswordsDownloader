@@ -8,7 +8,8 @@ You'll need to install [.NET 6](https://dotnet.microsoft.com/en-us/download/dotn
 
 ## How to install
 1. Open a command line window
-2. Run `dotnet tool install --global haveibeenpwned-downloader`
+2. Run `dotnet nuget add source https://api.nuget.org/v3/index.json -n nuget.org`
+3. Run `dotnet tool install --global haveibeenpwned-downloader`
 
 # Usage
 
