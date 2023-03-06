@@ -10,13 +10,16 @@ You'll need to install [.NET 6](https://dotnet.microsoft.com/en-us/download/dotn
 1. Open a command line window
 2. Run `dotnet tool install --global haveibeenpwned-downloader`
 
-# Usage
+# Usage Examples
 
-## Download all hashes to a single txt file called `pwnedpasswords.txt`
+## Download all SHA1 hashes to a single txt file called `pwnedpasswords.txt`
 `haveibeenpwned-downloader.exe pwnedpasswords`
 
-## Download all hashes to individual txt files into a custom directory called `hashes`
+## Download all SHA1 hashes to individual txt files into a custom directory called `hashes`
 `haveibeenpwned-downloader.exe pwnedpasswords -s false`
+
+## Download all NTLM hashes to a single txt file called `pwnedpasswords_ntlm.txt`
+`haveibeenpwned-downloader.exe -n pwnedpasswords_ntlm`
 
 # Additional parameters
 
@@ -25,6 +28,7 @@ You'll need to install [.NET 6](https://dotnet.microsoft.com/en-us/download/dotn
 | -s/--single | true | Determines wether to download hashes to a single file or as individual .txt files into another directory |
 | -p/--parallelism | Same as `Environment.ProcessorCount` | Determines how many hashes to download at a time |
 | -o/--overwrite | false | Determines if output files should be overwritten or not |
+| -n | (none) | When set, the downloader fetches NTLM hashes instead of SHA1 |
 
 # Additional usage examples
 ## Download all hashes to individual txt files into a custom directory called `hashes` using 64 threads to download the hashes
