@@ -13,7 +13,7 @@ jobs:
 
     env:
       MajorVersion: 0
-      MinorVersion: 2
+      MinorVersion: 3
     steps:
     - uses: actions/checkout@v2
 
