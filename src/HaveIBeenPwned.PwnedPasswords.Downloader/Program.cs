@@ -42,7 +42,7 @@ internal sealed class Statistics
     public double HashesPerSecond => HashesDownloaded / (ElapsedMilliseconds / 1000.0);
 }
 
-internal abstract class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloader.Settings>
+internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloader.Settings>
 {
     private readonly Statistics _statistics = new();
     private readonly HttpClient _httpClient = InitializeHttpClient();
@@ -56,7 +56,7 @@ internal abstract class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloa
             : $"[yellow]Failed attempt #{arg2} while fetching {requestUri}. Response contained HTTP Status code {arg1.Result?.StatusCode}.[/]");
     }
 
-    public abstract class Settings : CommandSettings
+    public sealed class Settings : CommandSettings
     {
         [Description("Name of the output. Defaults to pwnedpasswords, which writes the output to pwnedpasswords.txt for single file output, or a directory called pwnedpasswords.")]
         [CommandArgument(0, "[outputFile]")]
