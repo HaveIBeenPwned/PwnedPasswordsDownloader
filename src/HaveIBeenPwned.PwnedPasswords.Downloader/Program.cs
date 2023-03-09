@@ -205,11 +205,7 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
             requestUri += "?mode=ntlm";
         }
 
-        HttpResponseMessage response = await _policy.ExecuteAsync(() =>
-        {
-            using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
-            return _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
-        }).ConfigureAwait(false);
+        HttpResponseMessage response = await _policy.ExecuteAsync(() => _httpClient.GetAsync(requestUri)).ConfigureAwait(false);
         Stream content = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
         Interlocked.Add(ref _statistics.CloudflareRequestTimeTotal, cloudflareTimer.ElapsedMilliseconds);
         Interlocked.Increment(ref _statistics.CloudflareRequests);
