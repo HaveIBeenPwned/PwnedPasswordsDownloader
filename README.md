@@ -10,6 +10,12 @@ You'll need to install [.NET 6](https://dotnet.microsoft.com/en-us/download/dotn
 1. Open a command line window
 2. Run `dotnet tool install --global haveibeenpwned-downloader`
 
+### Troubleshooting
+If the installer is unable to resolve the package, then you can run the following and then try again.
+```
+dotnet nuget add source https://api.nuget.org/v3/index.json -n nuget.org
+```
+
 # Usage Examples
 
 ## Download all SHA1 hashes to a single txt file called `pwnedpasswords.txt`
