@@ -13,7 +13,7 @@ using Microsoft.Win32.SafeHandles;
 using Polly;
 using Polly.Extensions.Http;
 using Polly.Retry;
-
+using Polly.Timeout;
 using Spectre.Console;
 using Spectre.Console.Cli;
 
@@ -46,7 +46,7 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
 {
     private readonly Statistics _statistics = new();
     private readonly HttpClient _httpClient = InitializeHttpClient();
-    private readonly AsyncRetryPolicy<HttpResponseMessage> _policy = HttpPolicyExtensions.HandleTransientHttpError().RetryAsync(10, OnRequestError);
+    private readonly AsyncRetryPolicy<HttpResponseMessage> _policy = HttpPolicyExtensions.HandleTransientHttpError().Or<TaskCanceledException>().RetryAsync(10, OnRequestError);
 
     private static void OnRequestError(DelegateResult<HttpResponseMessage> arg1, int arg2)
     {
@@ -188,7 +188,7 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
             requestUri += "?mode=ntlm";
         }
 
-        HttpResponseMessage response = await _policy.ExecuteAsync(() => _httpClient.GetAsync(requestUri)).ConfigureAwait(false);
+        var response = await _policy.ExecuteAsync(async () => await _httpClient.GetAsync(requestUri));
         Stream content = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
         Interlocked.Add(ref _statistics.CloudflareRequestTimeTotal, cloudflareTimer.ElapsedMilliseconds);
         Interlocked.Increment(ref _statistics.CloudflareRequests);
