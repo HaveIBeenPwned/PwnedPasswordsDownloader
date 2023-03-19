@@ -54,6 +54,10 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
         AnsiConsole.MarkupLine(arg1.Exception != null
             ? $"[yellow]Failed request #{arg2} while fetching {requestUri}. Exception message: {arg1.Exception.Message}.[/]"
             : $"[yellow]Failed attempt #{arg2} while fetching {requestUri}. Response contained HTTP Status code {arg1.Result?.StatusCode}.[/]");
+        if(arg1.Exception != null)
+        {
+            AnsiConsole.WriteException(arg1.Exception, ExceptionFormats.ShortenEverything);
+        }
     }
 
     public sealed class Settings : CommandSettings
@@ -165,7 +169,7 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
             handler.SslProtocols = System.Security.Authentication.SslProtocols.Tls13 | System.Security.Authentication.SslProtocols.Tls12;
         }
 
-        HttpClient client = new(handler) { BaseAddress = new Uri("https://api.pwnedpasswords.com/range/"), DefaultRequestVersion = HttpVersion.Version20, DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrHigher};
+        HttpClient client = new(handler) { BaseAddress = new Uri("https://api.pwnedpasswords.com/range/") };
         string? process = Environment.ProcessPath;
         if (process != null)
         {
