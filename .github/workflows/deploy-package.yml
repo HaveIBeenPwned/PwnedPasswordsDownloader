@@ -11,7 +11,7 @@ jobs:
 
     env:
       MajorVersion: 0
-      MinorVersion: 3
+      MinorVersion: 4
     steps:
     - uses: actions/checkout@v2
 
@@ -32,10 +32,10 @@ jobs:
         VERPREF: ${{ format('{0}.{1}.{2}{3}', env.MajorVersion, env.MinorVersion, steps.date.outputs.date, github.run_number) }}
       run: echo "VersionPrefix=$(echo ${VERPREF})" >> $GITHUB_ENV
     
-    - name: Setup .NET 6.0 SDK
+    - name: Setup .NET 7.0 SDK
       uses: actions/setup-dotnet@v1
       with:
-        dotnet-version: 6.x
+        dotnet-version: 7.x
 
     - name: Build Project
       run: dotnet pack ./src/HaveIBeenPwned.PwnedPasswords.Downloader/HaveIBeenPwned.PwnedPasswords.Downloader.csproj --configuration Release
