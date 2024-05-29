@@ -49,7 +49,7 @@ static IHostBuilder CreateHostBuilder(string[] args) =>
         IHttpClientBuilder clientBuilder = services.AddHttpClient("PwnedPasswords");
         clientBuilder.AddResilienceHandler("retry", b =>
         {
-            b.AddRetry(new RetryStrategyOptions<HttpResponseMessage> { MaxRetryAttempts = 10, OnRetry = OnRequestErrorAsync });
+            b.AddRetry(new RetryStrategyOptions<HttpResponseMessage> { MaxRetryAttempts = 10, OnRetry = OnRequestErrorAsync, ShouldHandle = ShouldHandle });
         });
         clientBuilder.ConfigurePrimaryHttpMessageHandler(() =>
         {
@@ -78,6 +78,7 @@ static IHostBuilder CreateHostBuilder(string[] args) =>
 #endif
         });
     });
+static ValueTask<bool> ShouldHandle(RetryPredicateArguments<HttpResponseMessage> predicate) => ValueTask.FromResult((predicate.Outcome.Result?.IsSuccessStatusCode ?? false) != true);
 
 static ValueTask OnRequestErrorAsync(OnRetryArguments<HttpResponseMessage> args)
 {
