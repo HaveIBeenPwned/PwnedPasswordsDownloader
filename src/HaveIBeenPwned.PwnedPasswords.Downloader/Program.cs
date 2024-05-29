@@ -104,9 +104,8 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
     private readonly Statistics _statistics = new();
     private readonly HttpClient _httpClient;
 
-    public PwnedPasswordsDownloader(Statistics statistics, IHttpClientFactory httpClientFactory)
+    public PwnedPasswordsDownloader(IHttpClientFactory httpClientFactory)
     {
-        _statistics = statistics;
         _httpClient = httpClientFactory.CreateClient("PwnedPasswords");
     }
 
