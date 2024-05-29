@@ -46,12 +46,9 @@ static IHostBuilder CreateHostBuilder(string[] args) =>
     .CreateDefaultBuilder(args)
     .ConfigureServices((hostContext, services) =>
     {
-        IHttpClientBuilder clientBuilder = services.AddHttpClient("PwnedPasswords");
-        clientBuilder.AddResilienceHandler("retry", b =>
-        {
-            b.AddRetry(new RetryStrategyOptions<HttpResponseMessage> { MaxRetryAttempts = 10, OnRetry = OnRequestErrorAsync, ShouldHandle = ShouldHandle });
-        });
-        clientBuilder.ConfigurePrimaryHttpMessageHandler(() =>
+        services
+        .AddHttpClient("PwnedPasswords")
+        .ConfigurePrimaryHttpMessageHandler(() =>
         {
             var handler = new HttpClientHandler();
 
@@ -78,21 +75,6 @@ static IHostBuilder CreateHostBuilder(string[] args) =>
 #endif
         });
     });
-static ValueTask<bool> ShouldHandle(RetryPredicateArguments<HttpResponseMessage> predicate) => ValueTask.FromResult((predicate.Outcome.Result?.IsSuccessStatusCode ?? false) != true);
-
-static ValueTask OnRequestErrorAsync(OnRetryArguments<HttpResponseMessage> args)
-{
-    string requestUri = args.Outcome.Result?.RequestMessage?.RequestUri?.ToString() ?? "";
-    AnsiConsole.MarkupLine(args.Outcome.Exception != null
-        ? $"[yellow]Failed request #{args.AttemptNumber} while fetching {requestUri}. Exception message: {args.Outcome.Exception.Message}.[/]"
-        : $"[yellow]Failed attempt #{args.AttemptNumber} while fetching {requestUri}. Response contained HTTP Status code {args.Outcome.Result?.StatusCode}.[/]");
-    if (args.Outcome.Exception != null)
-    {
-        AnsiConsole.WriteException(args.Outcome.Exception, ExceptionFormats.ShortenEverything);
-    }
-
-    return ValueTask.CompletedTask;
-}
 
 internal sealed class Statistics
 {
@@ -107,12 +89,35 @@ internal sealed class Statistics
 
 internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloader.Settings>
 {
+    private static ResiliencePropertyKey<string> s_resiliencePropertyKey = new ResiliencePropertyKey<string>("uri");
     private readonly Statistics _statistics = new();
     private readonly HttpClient _httpClient;
+    private readonly ResiliencePipeline<HttpResponseMessage> _pipeline;
 
     public PwnedPasswordsDownloader(IHttpClientFactory httpClientFactory)
     {
         _httpClient = httpClientFactory.CreateClient("PwnedPasswords");
+        _pipeline = new ResiliencePipelineBuilder<HttpResponseMessage>().AddRetry(new RetryStrategyOptions<HttpResponseMessage>
+        {
+            ShouldHandle = new PredicateBuilder<HttpResponseMessage>()
+                .HandleResult(response => !response.IsSuccessStatusCode)
+                .Handle<HttpRequestException>(),
+            MaxRetryAttempts = 10,
+            BackoffType = DelayBackoffType.Linear,
+            Delay = TimeSpan.FromSeconds(2),
+            MaxDelay = TimeSpan.FromSeconds(10),
+            OnRetry = OnRequestErrorAsync
+        }).Build();
+    }
+
+    static ValueTask OnRequestErrorAsync(OnRetryArguments<HttpResponseMessage> args)
+    {
+        string uri = args.Context.Properties.GetValue(s_resiliencePropertyKey, "");
+        AnsiConsole.MarkupLine(args.Outcome.Exception != null
+            ? $"[yellow]Failed attempt #{args.AttemptNumber} while fetching {uri}. Exception is {args.Outcome.Exception.GetType().Name} and message: {args.Outcome.Exception.Message}.[/]"
+            : $"[yellow]Failed attempt #{args.AttemptNumber} while fetching {uri}. Response contained HTTP Status code {args.Outcome.Result?.StatusCode}.[/]");
+
+        return ValueTask.CompletedTask;
     }
 
     public sealed class Settings : CommandSettings
@@ -223,7 +228,10 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
             requestUri += "?mode=ntlm";
         }
 
-        HttpResponseMessage response = await _httpClient.GetAsync(requestUri);
+        var context = ResilienceContextPool.Shared.Get();
+        context.Properties.Set(s_resiliencePropertyKey, $"{_httpClient.BaseAddress}{requestUri}");
+        HttpResponseMessage response = await _pipeline.ExecuteAsync(async (ResilienceContext resilienceContext) => await _httpClient.GetAsync(requestUri, resilienceContext.CancellationToken).ConfigureAwait(false), context);
+        ResilienceContextPool.Shared.Return(context);
         Stream content = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
         Interlocked.Add(ref _statistics.CloudflareRequestTimeTotal, cloudflareTimer.ElapsedMilliseconds);
         Interlocked.Increment(ref _statistics.CloudflareRequests);
