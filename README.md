@@ -18,14 +18,33 @@ dotnet nuget add source https://api.nuget.org/v3/index.json -n nuget.org
 
 # Usage Examples
 
-## Download all SHA1 hashes to a single txt file called `pwnedpasswords.txt`
+## **Windows**
+
+
+### Download all SHA1 hashes to a single txt file called `pwnedpasswords.txt`
 `haveibeenpwned-downloader.exe pwnedpasswords`
 
-## Download all SHA1 hashes to individual txt files into a custom directory called `hashes`
+### Download all SHA1 hashes to individual txt files into a custom directory called `hashes`
 `haveibeenpwned-downloader.exe pwnedpasswords -s false`
 
-## Download all NTLM hashes to a single txt file called `pwnedpasswords_ntlm.txt`
+### Download all NTLM hashes to a single txt file called `pwnedpasswords_ntlm.txt`
 `haveibeenpwned-downloader.exe -n pwnedpasswords_ntlm`
+
+
+
+## **Linux**
+
+
+### Download all SHA1 hashes to a single txt file called `pwnedpasswords.txt` :
+`haveibeenpwned-downloader pwnedpasswords`
+
+### Download all SHA1 hashes to individual txt files into a custom directory called `hashes`:
+`haveibeenpwned-downloader pwnedpasswords -s false`
+
+### Download all NTLM hashes to a single txt file called `pwnedpasswords_ntlm.txt` : 
+`haveibeenpwned-downloader -n pwnedpasswords_ntlm`
+
+
 
 # Additional parameters
 
