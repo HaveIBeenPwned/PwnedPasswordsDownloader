@@ -4,7 +4,7 @@
 # Installation
 
 ## Prerequisites
-You'll need to install [.NET 6](https://dotnet.microsoft.com/en-us/download/dotnet/6.0) to be able to install the tool.
+You'll need to install [.NET 6](https://dotnet.microsoft.com/en-us/download/dotnet/6.0) to be able to install the tool. Choose the SDK-Version.
 
 ## How to install
 1. Open a command line window
