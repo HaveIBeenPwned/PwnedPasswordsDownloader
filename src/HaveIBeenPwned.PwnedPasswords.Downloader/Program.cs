@@ -10,6 +10,7 @@ using HaveIBeenPwned.PwnedPasswords;
 
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Win32.SafeHandles;
 
 using Polly;
@@ -19,6 +20,10 @@ using Spectre.Console;
 using Spectre.Console.Cli;
 
 IHostBuilder host = CreateHostBuilder(args);
+host.ConfigureLogging(builder =>
+{
+    builder.ClearProviders();
+});
 
 var registrar = new TypeRegistrar(host);
 
