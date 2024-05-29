@@ -33,7 +33,7 @@ namespace HaveIBeenPwned.PwnedPasswords
 
         internal static async Task CopyFrom<T>(this SafeFileHandle handle, T stream, int offset = 0) where T : Stream
         {
-            var pipe = GetPipe();
+            Pipe pipe = GetPipe();
             Task copyTask = stream.CopyToAsync(pipe.Writer).ContinueWith(CompleteWriter, pipe.Writer).Unwrap();
 
             try
