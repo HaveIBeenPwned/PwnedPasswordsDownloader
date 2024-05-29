@@ -8,27 +8,84 @@ using System.Threading.Channels;
 
 using HaveIBeenPwned.PwnedPasswords;
 
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Win32.SafeHandles;
 
 using Polly;
-using Polly.Extensions.Http;
 using Polly.Retry;
-using Polly.Timeout;
+
 using Spectre.Console;
 using Spectre.Console.Cli;
 
-var app = new CommandApp<PwnedPasswordsDownloader>();
+IHostBuilder host = CreateHostBuilder(args);
+
+var registrar = new TypeRegistrar(host);
+
+var app = new CommandApp<PwnedPasswordsDownloader>(registrar);
 
 app.Configure(config => config.PropagateExceptions());
 
 try
 {
-    return app.Run(args);
+    return await app.RunAsync(args);
 }
 catch (Exception ex)
 {
     AnsiConsole.WriteException(ex, ExceptionFormats.ShortenEverything);
     return -99;
+}
+
+static IHostBuilder CreateHostBuilder(string[] args) =>
+    Host
+    .CreateDefaultBuilder(args)
+    .ConfigureServices((hostContext, services) =>
+    {
+        IHttpClientBuilder clientBuilder = services.AddHttpClient("PwnedPasswords");
+        clientBuilder.AddResilienceHandler("retry", b =>
+        {
+            b.AddRetry(new RetryStrategyOptions<HttpResponseMessage> { MaxRetryAttempts = 10, OnRetry = OnRequestErrorAsync });
+        });
+        clientBuilder.ConfigurePrimaryHttpMessageHandler(() =>
+        {
+            var handler = new HttpClientHandler();
+
+            if (handler.SupportsAutomaticDecompression)
+            {
+                handler.AutomaticDecompression = DecompressionMethods.All;
+                handler.SslProtocols = System.Security.Authentication.SslProtocols.Tls13 | System.Security.Authentication.SslProtocols.Tls12;
+            }
+
+            return handler;
+        })
+        .ConfigureHttpClient(client =>
+        {
+            client.BaseAddress = new Uri("https://api.pwnedpasswords.com/range/");
+            string? process = Environment.ProcessPath;
+            if (process != null)
+            {
+                client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("hibp-downloader", FileVersionInfo.GetVersionInfo(process).ProductVersion));
+            }
+
+#if NET7_0_OR_GREATER
+            client.DefaultRequestVersion = HttpVersion.Version30;
+            client.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
+#endif
+        });
+    });
+
+static ValueTask OnRequestErrorAsync(OnRetryArguments<HttpResponseMessage> args)
+{
+    string requestUri = args.Outcome.Result?.RequestMessage?.RequestUri?.ToString() ?? "";
+    AnsiConsole.MarkupLine(args.Outcome.Exception != null
+        ? $"[yellow]Failed request #{args.AttemptNumber} while fetching {requestUri}. Exception message: {args.Outcome.Exception.Message}.[/]"
+        : $"[yellow]Failed attempt #{args.AttemptNumber} while fetching {requestUri}. Response contained HTTP Status code {args.Outcome.Result?.StatusCode}.[/]");
+    if (args.Outcome.Exception != null)
+    {
+        AnsiConsole.WriteException(args.Outcome.Exception, ExceptionFormats.ShortenEverything);
+    }
+
+    return ValueTask.CompletedTask;
 }
 
 internal sealed class Statistics
@@ -45,19 +102,12 @@ internal sealed class Statistics
 internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloader.Settings>
 {
     private readonly Statistics _statistics = new();
-    private readonly HttpClient _httpClient = InitializeHttpClient();
-    private readonly AsyncRetryPolicy<HttpResponseMessage> _policy = HttpPolicyExtensions.HandleTransientHttpError().Or<TaskCanceledException>().RetryAsync(10, OnRequestError);
+    private readonly HttpClient _httpClient;
 
-    private static void OnRequestError(DelegateResult<HttpResponseMessage> arg1, int arg2)
+    public PwnedPasswordsDownloader(Statistics statistics, IHttpClientFactory httpClientFactory)
     {
-        string requestUri = arg1.Result?.RequestMessage?.RequestUri?.ToString() ?? "";
-        AnsiConsole.MarkupLine(arg1.Exception != null
-            ? $"[yellow]Failed request #{arg2} while fetching {requestUri}. Exception message: {arg1.Exception.Message}.[/]"
-            : $"[yellow]Failed attempt #{arg2} while fetching {requestUri}. Response contained HTTP Status code {arg1.Result?.StatusCode}.[/]");
-        if(arg1.Exception != null)
-        {
-            AnsiConsole.WriteException(arg1.Exception, ExceptionFormats.ShortenEverything);
-        }
+        _statistics = statistics;
+        _httpClient = httpClientFactory.CreateClient("PwnedPasswords");
     }
 
     public sealed class Settings : CommandSettings
@@ -159,26 +209,6 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
         return 0;
     }
 
-    private static HttpClient InitializeHttpClient()
-    {
-        var handler = new HttpClientHandler();
-
-        if (handler.SupportsAutomaticDecompression)
-        {
-            handler.AutomaticDecompression = DecompressionMethods.All;
-            handler.SslProtocols = System.Security.Authentication.SslProtocols.Tls13 | System.Security.Authentication.SslProtocols.Tls12;
-        }
-
-        HttpClient client = new(handler) { BaseAddress = new Uri("https://api.pwnedpasswords.com/range/") };
-        string? process = Environment.ProcessPath;
-        if (process != null)
-        {
-            client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("hibp-downloader", FileVersionInfo.GetVersionInfo(process).ProductVersion));
-        }
-
-        return client;
-    }
-
     private async Task<Stream> GetPwnedPasswordsRangeFromWeb(int i, bool fetchNtlm)
     {
         var cloudflareTimer = Stopwatch.StartNew();
@@ -188,7 +218,7 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
             requestUri += "?mode=ntlm";
         }
 
-        var response = await _policy.ExecuteAsync(async () => await _httpClient.GetAsync(requestUri));
+        HttpResponseMessage response = await _httpClient.GetAsync(requestUri);
         Stream content = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
         Interlocked.Add(ref _statistics.CloudflareRequestTimeTotal, cloudflareTimer.ElapsedMilliseconds);
         Interlocked.Increment(ref _statistics.CloudflareRequests);
@@ -245,7 +275,11 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
         }
         else
         {
-            await Parallel.ForEachAsync(EnumerateRanges(), new ParallelOptions { MaxDegreeOfParallelism = settings.Parallelism }, async (i, _) =>
+            await Parallel.ForEachAsync(EnumerateRanges(), new ParallelOptions
+            {
+                MaxDegreeOfParallelism = settings.Parallelism,
+                TaskScheduler = TaskScheduler.Default
+            }, async (i, _) =>
             {
                 await DownloadRangeToFile(i, settings.OutputFile, settings.FetchNtlm).ConfigureAwait(false);
             });
@@ -285,4 +319,25 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
         await handle.CopyFrom(stream).ConfigureAwait(false);
         Interlocked.Increment(ref _statistics.HashesDownloaded);
     }
+}
+
+public sealed class TypeRegistrar : ITypeRegistrar
+{
+    private readonly IHostBuilder _builder;
+    public TypeRegistrar(IHostBuilder builder) => _builder = builder;
+    public ITypeResolver Build() => new TypeResolver(_builder.Build());
+    public void Register(Type service, Type implementation) => _builder.ConfigureServices((_, services) => services.AddSingleton(service, implementation));
+    public void RegisterInstance(Type service, object implementation) => _builder.ConfigureServices((_, services) => services.AddSingleton(service, implementation));
+    public void RegisterLazy(Type service, Func<object> func)
+    {
+        ArgumentNullException.ThrowIfNull(func);
+        _builder.ConfigureServices((_, services) => services.AddSingleton(service, _ => func()));
+    }
+}
+public sealed class TypeResolver : ITypeResolver, IDisposable
+{
+    private readonly IHost _host;
+    public TypeResolver(IHost provider) => _host = provider ?? throw new ArgumentNullException(nameof(provider));
+    public object? Resolve(Type? type) => type != null ? _host.Services.GetService(type) : null;
+    public void Dispose() => _host.Dispose();
 }
