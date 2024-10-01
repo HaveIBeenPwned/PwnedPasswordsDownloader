@@ -30,6 +30,12 @@ dotnet nuget add source https://api.nuget.org/v3/index.json -n nuget.org
 ### Download all NTLM hashes to a single txt file called `pwnedpasswords_ntlm.txt`
 `haveibeenpwned-downloader.exe -n pwnedpasswords_ntlm`
 
+### Download only new SHA1 hashes to folder
+haveibeenpwned-downloader -s False -e /db/etags_sha1.json /db/hibp_sha1
+
+### Download only new NTLM hashes to folder
+haveibeenpwned-downloader -s False -n -e /db/etags_ntlm.json /db/hibp_ntlm
+
 
 
 ## **Linux**
