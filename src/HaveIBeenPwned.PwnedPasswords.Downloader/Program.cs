@@ -48,17 +48,11 @@ static IHostBuilder CreateHostBuilder(string[] args) =>
     {
         services
         .AddHttpClient("PwnedPasswords")
-        .ConfigurePrimaryHttpMessageHandler(() =>
+        .UseSocketsHttpHandler((handler, provider) =>
         {
-            var handler = new HttpClientHandler();
-
-            if (handler.SupportsAutomaticDecompression)
-            {
-                handler.AutomaticDecompression = DecompressionMethods.All;
-                handler.SslProtocols = System.Security.Authentication.SslProtocols.Tls13 | System.Security.Authentication.SslProtocols.Tls12;
-            }
-
-            return handler;
+            handler.AutomaticDecompression = DecompressionMethods.All;
+            handler.SslOptions.EnabledSslProtocols = System.Security.Authentication.SslProtocols.Tls13 | System.Security.Authentication.SslProtocols.Tls12;
+            handler.EnableMultipleHttp2Connections = true;
         })
         .ConfigureHttpClient(client =>
         {
@@ -69,10 +63,8 @@ static IHostBuilder CreateHostBuilder(string[] args) =>
                 client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("hibp-downloader", FileVersionInfo.GetVersionInfo(process).ProductVersion));
             }
 
-#if NET7_0_OR_GREATER
-            client.DefaultRequestVersion = HttpVersion.Version30;
+            client.DefaultRequestVersion = HttpVersion.Version20;
             client.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
-#endif
         });
     });
 
