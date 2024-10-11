@@ -1,7 +1,7 @@
 # What is haveibeenpwned-downloader?
 `haveibeenpwned-downloader` is a [dotnet tool](https://docs.microsoft.com/en-us/dotnet/core/tools/global-tools) to download all Pwned Passwords hash ranges and save them offline so they can be used without a dependency on the k-anonymity API.
 
-An alternative to running this tool is to use Zsolt Müller's cURL approach in https://github.com/HaveIBeenPwned/PwnedPasswordsDownloader/issues/79 that makes use of a regular expression and parallelism.
+An alternative to running this tool is to use Zsolt Müller's cURL approach in https://github.com/HaveIBeenPwned/PwnedPasswordsDownloader/issues/79 that makes use of a glob pattern and parallelism.
 
 # Installation
 
