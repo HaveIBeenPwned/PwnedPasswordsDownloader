@@ -50,7 +50,7 @@ static IHostBuilder CreateHostBuilder(string[] args) =>
         .AddHttpClient("PwnedPasswords")
         .UseSocketsHttpHandler((handler, provider) =>
         {
-            handler.AutomaticDecompression = DecompressionMethods.All;
+            handler.AutomaticDecompression = DecompressionMethods.None;
             handler.SslOptions.EnabledSslProtocols = System.Security.Authentication.SslProtocols.Tls13 | System.Security.Authentication.SslProtocols.Tls12;
             handler.EnableMultipleHttp2Connections = true;
         })
@@ -81,7 +81,7 @@ internal sealed class Statistics
 
 internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloader.Settings>
 {
-    private static ResiliencePropertyKey<string> s_resiliencePropertyKey = new ResiliencePropertyKey<string>("uri");
+    private static readonly ResiliencePropertyKey<string> s_resiliencePropertyKey = new("uri");
     private readonly Statistics _statistics = new();
     private readonly HttpClient _httpClient;
     private readonly ResiliencePipeline<HttpResponseMessage> _pipeline;
@@ -139,7 +139,7 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
         public bool FetchNtlm { get; set; } = false;
     }
 
-    public override int Execute([NotNull]CommandContext context, [NotNull]Settings settings)
+    public override int Execute([NotNull] CommandContext context, [NotNull] Settings settings)
     {
         if (settings.Parallelism < 2)
         {
@@ -220,7 +220,7 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
             requestUri += "?mode=ntlm";
         }
 
-        var context = ResilienceContextPool.Shared.Get();
+        ResilienceContext context = ResilienceContextPool.Shared.Get();
         context.Properties.Set(s_resiliencePropertyKey, $"{_httpClient.BaseAddress}{requestUri}");
         HttpResponseMessage response = await _pipeline.ExecuteAsync(async (ResilienceContext resilienceContext) => await _httpClient.GetAsync(requestUri, resilienceContext.CancellationToken).ConfigureAwait(false), context);
         ResilienceContextPool.Shared.Return(context);
@@ -293,7 +293,7 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
 
     private static IEnumerable<int> EnumerateRanges()
     {
-        for (int i = 0; i < 1024*1024; i++)
+        for (int i = 0; i < 1024 * 1024; i++)
         {
             yield return i;
         }
@@ -303,7 +303,7 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
     {
         try
         {
-            foreach(int i in EnumerateRanges())
+            foreach (int i in EnumerateRanges())
             {
                 await channelWriter.WriteAsync(GetPwnedPasswordsRangeFromWeb(i, fetchNtlm));
             }
