@@ -52,7 +52,7 @@ dotnet nuget add source https://api.nuget.org/v3/index.json -n nuget.org
 
 | Parameter   | Default value | Description |
 |-------------|---------------|-------------|
-| -s/--single | true | Determines wether to download hashes to a single file or as individual .txt files into another directory |
+| -s/--single | true | Determines whether to download hashes to a single file or as individual .txt files into another directory |
 | -p/--parallelism | Same as `Environment.ProcessorCount` | Determines how many hashes to download at a time |
 | -o/--overwrite | false | Determines if output files should be overwritten or not |
 | -n | (none) | When set, the downloader fetches NTLM hashes instead of SHA1 |
