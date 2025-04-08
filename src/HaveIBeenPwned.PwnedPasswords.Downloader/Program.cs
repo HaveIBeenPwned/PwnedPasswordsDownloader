@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Text.Json;
 using System.Threading.Channels;
 
 using HaveIBeenPwned.PwnedPasswords;
@@ -86,13 +87,56 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
     private readonly HttpClient _httpClient;
     private readonly ResiliencePipeline<HttpResponseMessage> _pipeline;
 
+    private string[] _etag = new string[1024 * 1024];
+
+    private void ReadEtagFile(string filePath)
+    {
+        try
+        {
+            if (File.Exists(filePath))
+            {
+                string json;
+                using (StreamReader reader = File.OpenText(filePath))
+                {
+                    json = reader.ReadToEnd();
+                }
+                string[]? data = JsonSerializer.Deserialize<string[]>(json);
+                if (data != null)
+                {
+                    _etag = data;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error deserializing the object: {ex.Message}");
+        }
+    }
+
+    private void WriteEtagFile(string filePath)
+    {
+        try
+        {
+            string json = JsonSerializer.Serialize(_etag);
+            using (StreamWriter writer = File.CreateText(filePath))
+            {
+                writer.Write(json);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error serializing and storing the object: {ex.Message}");
+        }
+    }
+
+
     public PwnedPasswordsDownloader(IHttpClientFactory httpClientFactory)
     {
         _httpClient = httpClientFactory.CreateClient("PwnedPasswords");
         _pipeline = new ResiliencePipelineBuilder<HttpResponseMessage>().AddRetry(new RetryStrategyOptions<HttpResponseMessage>
         {
             ShouldHandle = new PredicateBuilder<HttpResponseMessage>()
-                .HandleResult(response => !response.IsSuccessStatusCode)
+                .HandleResult(response => !response.IsSuccessStatusCode && response.StatusCode != HttpStatusCode.NotModified)
                 .Handle<HttpRequestException>(),
             MaxRetryAttempts = 10,
             BackoffType = DelayBackoffType.Linear,
@@ -137,6 +181,11 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
         [CommandOption("-n|--ntlm")]
         [DefaultValue(false)]
         public bool FetchNtlm { get; set; } = false;
+
+        [Description("Name of the EtagStorageFile. This option is only effective when used with individual files within a subfolder.")]
+        [CommandOption("-e|--etag")]
+        [DefaultValue("")]
+        public string EtagBinName { get; set; } = "";
     }
 
     public override int Execute([NotNull] CommandContext context, [NotNull] Settings settings)
@@ -173,10 +222,14 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
                         Directory.CreateDirectory(settings.OutputFile);
                     }
 
-                    if (!settings.Overwrite && Directory.EnumerateFiles(settings.OutputFile).Any())
+                    if (string.IsNullOrEmpty(settings.EtagBinName) && !settings.Overwrite && Directory.EnumerateFiles(settings.OutputFile).Any())
                     {
                         AnsiConsole.MarkupLine($"Output directory {settings.OutputFile.EscapeMarkup()} already exists and is not empty. Use -o if you want to overwrite files.");
                         return;
+                    }
+                    if (!string.IsNullOrEmpty(settings.EtagBinName))
+                    {
+                        ReadEtagFile(settings.EtagBinName);
                     }
                 }
 
@@ -205,13 +258,17 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
             });
 
         processingTask.Wait();
+        if (!string.IsNullOrEmpty(settings.EtagBinName))
+        {
+            WriteEtagFile(settings.EtagBinName);
+        }
         AnsiConsole.MarkupLine($"Finished downloading all hash ranges in {_statistics.ElapsedMilliseconds:N0}ms ({_statistics.HashesPerSecond:N2} hashes per second).");
         AnsiConsole.MarkupLine($"We made {_statistics.CloudflareRequests:N0} Cloudflare requests (avg response time: {(double)_statistics.CloudflareRequestTimeTotal / _statistics.CloudflareRequests:N2}ms). Of those, Cloudflare had already cached {_statistics.CloudflareHits:N0} requests, and made {_statistics.CloudflareMisses:N0} requests to the Have I Been Pwned origin server.");
 
         return 0;
     }
 
-    private async Task<Stream> GetPwnedPasswordsRangeFromWeb(int i, bool fetchNtlm)
+    private async Task<(Stream, bool)> GetPwnedPasswordsRangeFromWeb(int i, bool fetchNtlm)
     {
         var cloudflareTimer = Stopwatch.StartNew();
         string requestUri = GetHashRange(i);
@@ -222,14 +279,32 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
 
         ResilienceContext context = ResilienceContextPool.Shared.Get();
         context.Properties.Set(s_resiliencePropertyKey, $"{_httpClient.BaseAddress}{requestUri}");
-        HttpResponseMessage response = await _pipeline.ExecuteAsync(async (ResilienceContext resilienceContext) => await _httpClient.GetAsync(requestUri, resilienceContext.CancellationToken).ConfigureAwait(false), context);
+        HttpResponseMessage response = await _pipeline.ExecuteAsync(async (ResilienceContext resilienceContext) =>
+        {
+            var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
+            if (!string.IsNullOrEmpty(_etag[i]))
+            {
+                request.Headers.Add("If-None-Match", _etag[i]);
+            }
+            return await _httpClient.SendAsync(request, resilienceContext.CancellationToken);
+        }, context);
         ResilienceContextPool.Shared.Return(context);
-        Stream content = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+
         Interlocked.Add(ref _statistics.CloudflareRequestTimeTotal, cloudflareTimer.ElapsedMilliseconds);
         Interlocked.Increment(ref _statistics.CloudflareRequests);
+
+        bool data_updated = response.StatusCode != HttpStatusCode.NotModified;
+
+        if (response.StatusCode == HttpStatusCode.NotModified)
+        {
+            return (new MemoryStream(), false);
+        }
+
+        Stream content = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+
         if (!response.Headers.TryGetValues("CF-Cache-Status", out IEnumerable<string>? values))
         {
-            return content;
+            return (content, data_updated);
         }
 
         switch (values.FirstOrDefault())
@@ -242,7 +317,12 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
                 break;
         }
 
-        return content;
+        if (data_updated && response.Headers.TryGetValues("Etag", out IEnumerable<string>? new_etag))
+        {
+            _etag[i] = new_etag.FirstOrDefault() ?? "";
+        }
+
+        return (content, data_updated);
     }
 
     private static string GetHashRange(int i)
@@ -305,7 +385,7 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
         {
             foreach (int i in EnumerateRanges())
             {
-                await channelWriter.WriteAsync(GetPwnedPasswordsRangeFromWeb(i, fetchNtlm));
+                await channelWriter.WriteAsync(Task.FromResult((await GetPwnedPasswordsRangeFromWeb(i, fetchNtlm)).Item1));
             }
 
             channelWriter.TryComplete();
@@ -318,10 +398,13 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
 
     private async Task DownloadRangeToFile(int currentHash, string outputDirectory, bool fetchNtlm)
     {
-        await using Stream stream = await GetPwnedPasswordsRangeFromWeb(currentHash, fetchNtlm).ConfigureAwait(false);
-        using SafeFileHandle handle = File.OpenHandle(Path.Combine(outputDirectory, $"{GetHashRange(currentHash)}.txt"), FileMode.Create, FileAccess.Write,
-            FileShare.None, FileOptions.Asynchronous);
-        await handle.CopyFrom(stream).ConfigureAwait(false);
+        (Stream stream, bool data_updated) = await GetPwnedPasswordsRangeFromWeb(currentHash, fetchNtlm).ConfigureAwait(false);
+        if (data_updated)
+        {
+            using SafeFileHandle handle = File.OpenHandle(Path.Combine(outputDirectory, $"{GetHashRange(currentHash)}.txt"),
+                FileMode.Create, FileAccess.Write, FileShare.None, FileOptions.Asynchronous);
+            await handle.CopyFrom(stream).ConfigureAwait(false);
+        }
         Interlocked.Increment(ref _statistics.HashesDownloaded);
     }
 }
