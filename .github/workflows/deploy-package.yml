@@ -32,10 +32,10 @@ jobs:
         VERPREF: ${{ format('{0}.{1}.{2}{3}', env.MajorVersion, env.MinorVersion, steps.date.outputs.date, github.run_number) }}
       run: echo "VersionPrefix=$(echo ${VERPREF})" >> $GITHUB_ENV
     
-    - name: Setup .NET 8.0 SDK
+    - name: Setup .NET 9.0 SDK
       uses: actions/setup-dotnet@v1
       with:
-        dotnet-version: 8.x
+        dotnet-version: 9.x
 
     - name: Build Project
       run: dotnet pack ./src/HaveIBeenPwned.PwnedPasswords.Downloader/HaveIBeenPwned.PwnedPasswords.Downloader.csproj --configuration Release

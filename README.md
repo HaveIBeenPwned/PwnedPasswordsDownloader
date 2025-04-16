@@ -6,11 +6,15 @@ An alternative to running this tool is to use Zsolt Müller's cURL approach in h
 # Installation
 
 ## Prerequisites
-You'll need to install the latest LTS (Long Term Support) version of the [.NET SDK](https://dotnet.microsoft.com/en-us/download/dotnet/8.0) to be able to install the tool.
+You'll need to install the latest [LTS (Long Term Support)](https://dotnet.microsoft.com/en-us/download/dotnet/8.0) or [STS (Short Term Support)](https://dotnet.microsoft.com/en-us/download/dotnet/9.0) version of the .NET SDK to be able to install and run the tool.
 
 ## How to install
 1. Open a command line window
 2. Run `dotnet tool install --global haveibeenpwned-downloader`
+
+## How to update to the latest version
+1. Open a command line window
+2. Run `dotnet tool update --global haveibeenpwned-downloader`
 
 ### Troubleshooting
 If the installer is unable to resolve the package, then you can run the following and then try again.
