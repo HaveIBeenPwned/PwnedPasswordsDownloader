@@ -65,6 +65,7 @@ static IHostBuilder CreateHostBuilder(string[] args) =>
 
             client.DefaultRequestVersion = HttpVersion.Version20;
             client.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
+            client.Timeout = TimeSpan.FromSeconds(5);
         });
     });
 
@@ -93,7 +94,10 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
         {
             ShouldHandle = new PredicateBuilder<HttpResponseMessage>()
                 .HandleResult(response => !response.IsSuccessStatusCode)
-                .Handle<HttpRequestException>(),
+                .Handle<HttpRequestException>()
+                .Handle<OperationCanceledException>()
+                .Handle<TimeoutException>()
+                .Handle<TaskCanceledException>(),
             MaxRetryAttempts = 10,
             BackoffType = DelayBackoffType.Linear,
             Delay = TimeSpan.FromSeconds(2),
@@ -326,23 +330,22 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
     }
 }
 
-public sealed class TypeRegistrar : ITypeRegistrar
+public sealed class TypeRegistrar(IHostBuilder builder) : ITypeRegistrar
 {
-    private readonly IHostBuilder _builder;
-    public TypeRegistrar(IHostBuilder builder) => _builder = builder;
-    public ITypeResolver Build() => new TypeResolver(_builder.Build());
-    public void Register(Type service, Type implementation) => _builder.ConfigureServices((_, services) => services.AddSingleton(service, implementation));
-    public void RegisterInstance(Type service, object implementation) => _builder.ConfigureServices((_, services) => services.AddSingleton(service, implementation));
+    public ITypeResolver Build() => new TypeResolver(builder.Build());
+    
+    public void Register(Type service, Type implementation) => builder.ConfigureServices((_, services) => services.AddSingleton(service, implementation));
+    public void RegisterInstance(Type service, object implementation) => builder.ConfigureServices((_, services) => services.AddSingleton(service, implementation));
     public void RegisterLazy(Type service, Func<object> func)
     {
         ArgumentNullException.ThrowIfNull(func);
-        _builder.ConfigureServices((_, services) => services.AddSingleton(service, _ => func()));
+        builder.ConfigureServices((_, services) => services.AddSingleton(service, _ => func()));
     }
 }
-public sealed class TypeResolver : ITypeResolver, IDisposable
+
+public sealed class TypeResolver(IHost provider) : ITypeResolver, IDisposable
 {
-    private readonly IHost _host;
-    public TypeResolver(IHost provider) => _host = provider ?? throw new ArgumentNullException(nameof(provider));
+    private readonly IHost _host = provider ?? throw new ArgumentNullException(nameof(provider));
     public object? Resolve(Type? type) => type != null ? _host.Services.GetService(type) : null;
     public void Dispose() => _host.Dispose();
 }
