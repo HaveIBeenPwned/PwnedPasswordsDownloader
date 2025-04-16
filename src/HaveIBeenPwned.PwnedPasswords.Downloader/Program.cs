@@ -50,7 +50,7 @@ static IHostBuilder CreateHostBuilder(string[] args) =>
         .AddHttpClient("PwnedPasswords")
         .UseSocketsHttpHandler((handler, provider) =>
         {
-            handler.AutomaticDecompression = DecompressionMethods.None;
+            handler.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
             handler.SslOptions.EnabledSslProtocols = System.Security.Authentication.SslProtocols.Tls13 | System.Security.Authentication.SslProtocols.Tls12;
             handler.EnableMultipleHttp2Connections = true;
         })
