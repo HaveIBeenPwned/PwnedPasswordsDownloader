@@ -80,7 +80,7 @@ internal sealed class Statistics
     public double HashesPerSecond => HashesDownloaded / (ElapsedMilliseconds / 1000.0);
 }
 
-internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloader.Settings>
+internal sealed class PwnedPasswordsDownloader : AsyncCommand<PwnedPasswordsDownloader.Settings>
 {
     private static readonly ResiliencePropertyKey<string> s_resiliencePropertyKey = new("uri");
     private readonly Statistics _statistics = new();
@@ -143,76 +143,85 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
         public bool FetchNtlm { get; set; } = false;
     }
 
-    public override int Execute([NotNull] CommandContext context, [NotNull] Settings settings)
+    public override async Task<int> ExecuteAsync([NotNull] CommandContext context, [NotNull] Settings settings)
     {
         if (settings.Parallelism < 2)
         {
             settings.Parallelism = Math.Max(Environment.ProcessorCount * 8, 2);
         }
 
-        Task processingTask = AnsiConsole.Progress()
-            .AutoRefresh(false) // Turn off auto refresh
-            .AutoClear(false)   // Do not remove the task list when done
-            .HideCompleted(false)   // Hide tasks as they are completed
-            .Columns(new TaskDescriptionColumn(), new ProgressBarColumn(), new PercentageColumn(), new RemainingTimeColumn(), new SpinnerColumn())
-            .StartAsync(async ctx =>
-            {
-                if (settings.SingleFile)
+        try
+        {
+            await AnsiConsole.Progress()
+                .AutoRefresh(false) // Turn off auto refresh
+                .AutoClear(false)   // Do not remove the task list when done
+                .HideCompleted(false)   // Hide tasks as they are completed
+                .Columns(new TaskDescriptionColumn(), new ProgressBarColumn(), new PercentageColumn(), new RemainingTimeColumn(), new SpinnerColumn())
+                .StartAsync(async ctx =>
                 {
-                    if (File.Exists($"{settings.OutputFile}.txt"))
+                    if (settings.SingleFile)
                     {
-                        if (!settings.Overwrite)
+                        if (File.Exists($"{settings.OutputFile}.txt"))
                         {
-                            AnsiConsole.MarkupLine($"Output file {settings.OutputFile.EscapeMarkup()}.txt already exists. Use -o if you want to overwrite it.");
-                            return;
+                            if (!settings.Overwrite)
+                            {
+                                AnsiConsole.MarkupLine($"Output file {settings.OutputFile.EscapeMarkup()}.txt already exists. Use -o if you want to overwrite it.");
+                                return;
+                            }
+
+                            File.Delete($"{settings.OutputFile}.txt");
+                        }
+                    }
+                    else
+                    {
+                        if (!Directory.Exists(settings.OutputFile))
+                        {
+                            Directory.CreateDirectory(settings.OutputFile);
                         }
 
-                        File.Delete($"{settings.OutputFile}.txt");
+                        if (!settings.Overwrite && Directory.EnumerateFiles(settings.OutputFile).Any())
+                        {
+                            AnsiConsole.MarkupLine($"Output directory {settings.OutputFile.EscapeMarkup()} already exists and is not empty. Use -o if you want to overwrite files.");
+                            return;
+                        }
                     }
-                }
-                else
-                {
-                    if (!Directory.Exists(settings.OutputFile))
+
+
+                    var timer = Stopwatch.StartNew();
+                    ProgressTask progressTask = ctx.AddTask("[green]Hash ranges downloaded[/]", true, 1024 * 1024);
+                    Task processTask = ProcessRanges(settings);
+
+                    do
                     {
-                        Directory.CreateDirectory(settings.OutputFile);
+                        progressTask.Value = _statistics.HashesDownloaded;
+                        ctx.Refresh();
+                        await Task.Delay(100).ConfigureAwait(false);
                     }
+                    while (!processTask.IsCompleted);
 
-                    if (!settings.Overwrite && Directory.EnumerateFiles(settings.OutputFile).Any())
+                    if (processTask.Exception is not null)
                     {
-                        AnsiConsole.MarkupLine($"Output directory {settings.OutputFile.EscapeMarkup()} already exists and is not empty. Use -o if you want to overwrite files.");
-                        return;
+                        throw processTask.Exception;
                     }
-                }
 
-
-                var timer = Stopwatch.StartNew();
-                ProgressTask progressTask = ctx.AddTask("[green]Hash ranges downloaded[/]", true, 1024 * 1024);
-                Task processTask = ProcessRanges(settings);
-
-                do
-                {
+                    _statistics.ElapsedMilliseconds = timer.ElapsedMilliseconds;
                     progressTask.Value = _statistics.HashesDownloaded;
                     ctx.Refresh();
-                    await Task.Delay(100).ConfigureAwait(false);
-                }
-                while (!processTask.IsCompleted);
+                    progressTask.StopTask();
+                });
 
-                if (processTask.Exception is not null && processTask.Exception.InnerException is not null)
-                {
-                    AnsiConsole.WriteException(processTask.Exception.InnerException);
-                }
+            AnsiConsole.MarkupLine($"Finished downloading all hash ranges in {_statistics.ElapsedMilliseconds:N0}ms ({_statistics.HashesPerSecond:N2} hashes per second).");
+            AnsiConsole.MarkupLine($"We made {_statistics.CloudflareRequests:N0} Cloudflare requests (avg response time: {(double)_statistics.CloudflareRequestTimeTotal / _statistics.CloudflareRequests:N2}ms). Of those, Cloudflare had already cached {_statistics.CloudflareHits:N0} requests, and made {_statistics.CloudflareMisses:N0} requests to the Have I Been Pwned origin server.");
 
-                _statistics.ElapsedMilliseconds = timer.ElapsedMilliseconds;
-                progressTask.Value = _statistics.HashesDownloaded;
-                ctx.Refresh();
-                progressTask.StopTask();
-            });
+            return 0;
+        }
+        catch (Exception e)
+        {
+            AnsiConsole.MarkupLine($"Failed to download hash ranges: {e.Message}");
+            AnsiConsole.WriteException(e);
 
-        processingTask.Wait();
-        AnsiConsole.MarkupLine($"Finished downloading all hash ranges in {_statistics.ElapsedMilliseconds:N0}ms ({_statistics.HashesPerSecond:N2} hashes per second).");
-        AnsiConsole.MarkupLine($"We made {_statistics.CloudflareRequests:N0} Cloudflare requests (avg response time: {(double)_statistics.CloudflareRequestTimeTotal / _statistics.CloudflareRequests:N2}ms). Of those, Cloudflare had already cached {_statistics.CloudflareHits:N0} requests, and made {_statistics.CloudflareMisses:N0} requests to the Have I Been Pwned origin server.");
-
-        return 0;
+            return -1;
+        }
     }
 
     private async Task<Stream> GetPwnedPasswordsRangeFromWeb(int i, bool fetchNtlm)
@@ -333,7 +342,7 @@ internal sealed class PwnedPasswordsDownloader : Command<PwnedPasswordsDownloade
 public sealed class TypeRegistrar(IHostBuilder builder) : ITypeRegistrar
 {
     public ITypeResolver Build() => new TypeResolver(builder.Build());
-    
+
     public void Register(Type service, Type implementation) => builder.ConfigureServices((_, services) => services.AddSingleton(service, implementation));
     public void RegisterInstance(Type service, object implementation) => builder.ConfigureServices((_, services) => services.AddSingleton(service, implementation));
     public void RegisterLazy(Type service, Func<object> func)
