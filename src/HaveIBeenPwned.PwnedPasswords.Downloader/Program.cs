@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Text;
 using System.Threading.Channels;
 
 using HaveIBeenPwned.PwnedPasswords;
@@ -12,9 +13,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Win32.SafeHandles;
-
-using Polly;
-using Polly.Retry;
 
 using Spectre.Console;
 using Spectre.Console.Cli;
@@ -82,38 +80,14 @@ internal sealed class Statistics
 
 internal sealed class PwnedPasswordsDownloader : AsyncCommand<PwnedPasswordsDownloader.Settings>
 {
-    private static readonly ResiliencePropertyKey<string> s_resiliencePropertyKey = new("uri");
+    private static readonly TimeSpan s_retryDelay = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan s_maxRetryDelay = TimeSpan.FromSeconds(10);
     private readonly Statistics _statistics = new();
     private readonly HttpClient _httpClient;
-    private readonly ResiliencePipeline<HttpResponseMessage> _pipeline;
 
     public PwnedPasswordsDownloader(IHttpClientFactory httpClientFactory)
     {
         _httpClient = httpClientFactory.CreateClient("PwnedPasswords");
-        _pipeline = new ResiliencePipelineBuilder<HttpResponseMessage>().AddRetry(new RetryStrategyOptions<HttpResponseMessage>
-        {
-            ShouldHandle = new PredicateBuilder<HttpResponseMessage>()
-                .HandleResult(response => !response.IsSuccessStatusCode)
-                .Handle<HttpRequestException>()
-                .Handle<OperationCanceledException>()
-                .Handle<TimeoutException>()
-                .Handle<TaskCanceledException>(),
-            MaxRetryAttempts = 10,
-            BackoffType = DelayBackoffType.Linear,
-            Delay = TimeSpan.FromSeconds(2),
-            MaxDelay = TimeSpan.FromSeconds(10),
-            OnRetry = OnRequestErrorAsync
-        }).Build();
-    }
-
-    static ValueTask OnRequestErrorAsync(OnRetryArguments<HttpResponseMessage> args)
-    {
-        string uri = args.Context.Properties.GetValue(s_resiliencePropertyKey, "");
-        AnsiConsole.MarkupLine(args.Outcome.Exception != null
-            ? $"[yellow]Failed attempt #{args.AttemptNumber} while fetching {uri}. Exception is {args.Outcome.Exception.GetType().Name} and message: {args.Outcome.Exception.Message}.[/]"
-            : $"[yellow]Failed attempt #{args.AttemptNumber} while fetching {uri}. Response contained HTTP Status code {args.Outcome.Result?.StatusCode}.[/]");
-
-        return ValueTask.CompletedTask;
     }
 
     public sealed class Settings : CommandSettings
@@ -141,6 +115,20 @@ internal sealed class PwnedPasswordsDownloader : AsyncCommand<PwnedPasswordsDown
         [CommandOption("-n|--ntlm")]
         [DefaultValue(false)]
         public bool FetchNtlm { get; set; } = false;
+
+        [Description("Maximum number of retries per prefix. Omit for unlimited retries. Use 0 to disable retries.")]
+        [CommandOption("--max-retries")]
+        public int? MaxRetries { get; init; }
+
+        public override ValidationResult Validate()
+        {
+            if (MaxRetries < 0)
+            {
+                return ValidationResult.Error("--max-retries must be 0 or greater.");
+            }
+
+            return ValidationResult.Success();
+        }
     }
 
     public override async Task<int> ExecuteAsync([NotNull] CommandContext context, [NotNull] Settings settings)
@@ -149,6 +137,15 @@ internal sealed class PwnedPasswordsDownloader : AsyncCommand<PwnedPasswordsDown
         {
             settings.Parallelism = Math.Max(Environment.ProcessorCount * 8, 2);
         }
+
+        using CancellationTokenSource cancellationTokenSource = new();
+        ConsoleCancelEventHandler cancelHandler = (_, args) =>
+        {
+            args.Cancel = true;
+            cancellationTokenSource.Cancel();
+        };
+
+        Console.CancelKeyPress += cancelHandler;
 
         try
         {
@@ -189,20 +186,17 @@ internal sealed class PwnedPasswordsDownloader : AsyncCommand<PwnedPasswordsDown
 
                     var timer = Stopwatch.StartNew();
                     ProgressTask progressTask = ctx.AddTask("[green]Hash ranges downloaded[/]", true, 1024 * 1024);
-                    Task processTask = ProcessRanges(settings);
+                    Task processTask = ProcessRanges(settings, cancellationTokenSource.Token);
 
                     do
                     {
                         progressTask.Value = _statistics.HashesDownloaded;
                         ctx.Refresh();
-                        await Task.Delay(100).ConfigureAwait(false);
+                        await Task.Delay(100, cancellationTokenSource.Token).ConfigureAwait(false);
                     }
                     while (!processTask.IsCompleted);
 
-                    if (processTask.Exception is not null)
-                    {
-                        throw processTask.Exception;
-                    }
+                    await processTask.ConfigureAwait(false);
 
                     _statistics.ElapsedMilliseconds = timer.ElapsedMilliseconds;
                     progressTask.Value = _statistics.HashesDownloaded;
@@ -215,6 +209,11 @@ internal sealed class PwnedPasswordsDownloader : AsyncCommand<PwnedPasswordsDown
 
             return 0;
         }
+        catch (OperationCanceledException) when (cancellationTokenSource.IsCancellationRequested)
+        {
+            AnsiConsole.MarkupLine("[yellow]Download canceled.[/]");
+            return -2;
+        }
         catch (Exception e)
         {
             AnsiConsole.MarkupLine($"Failed to download hash ranges: {e.Message}");
@@ -222,27 +221,42 @@ internal sealed class PwnedPasswordsDownloader : AsyncCommand<PwnedPasswordsDown
 
             return -1;
         }
+        finally
+        {
+            Console.CancelKeyPress -= cancelHandler;
+        }
     }
 
-    private async Task<Stream> GetPwnedPasswordsRangeFromWeb(int i, bool fetchNtlm)
+    private async Task<HttpResponseMessage> GetPwnedPasswordsRangeFromWeb(string prefix, bool fetchNtlm, CancellationToken cancellationToken)
     {
-        var cloudflareTimer = Stopwatch.StartNew();
-        string requestUri = GetHashRange(i);
+        Stopwatch cloudflareTimer = Stopwatch.StartNew();
+        string requestUri = prefix;
         if (fetchNtlm)
         {
             requestUri += "?mode=ntlm";
         }
 
-        ResilienceContext context = ResilienceContextPool.Shared.Get();
-        context.Properties.Set(s_resiliencePropertyKey, $"{_httpClient.BaseAddress}{requestUri}");
-        HttpResponseMessage response = await _pipeline.ExecuteAsync(async (ResilienceContext resilienceContext) => await _httpClient.GetAsync(requestUri, resilienceContext.CancellationToken).ConfigureAwait(false), context);
-        ResilienceContextPool.Shared.Return(context);
-        Stream content = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+        HttpResponseMessage response = await _httpClient.GetAsync(requestUri, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         Interlocked.Add(ref _statistics.CloudflareRequestTimeTotal, cloudflareTimer.ElapsedMilliseconds);
         Interlocked.Increment(ref _statistics.CloudflareRequests);
+
+        TrackCloudflareCacheStatus(response);
+
+        if (response.IsSuccessStatusCode)
+        {
+            return response;
+        }
+
+        HttpStatusCode statusCode = response.StatusCode;
+        response.Dispose();
+        throw new HttpRequestException($"Response contained HTTP status code {(int)statusCode} ({statusCode}).", inner: null, statusCode);
+    }
+
+    private void TrackCloudflareCacheStatus(HttpResponseMessage response)
+    {
         if (!response.Headers.TryGetValues("CF-Cache-Status", out IEnumerable<string>? values))
         {
-            return content;
+            return;
         }
 
         switch (values.FirstOrDefault())
@@ -254,8 +268,6 @@ internal sealed class PwnedPasswordsDownloader : AsyncCommand<PwnedPasswordsDown
                 Interlocked.Increment(ref _statistics.CloudflareMisses);
                 break;
         }
-
-        return content;
     }
 
     private static string GetHashRange(int i)
@@ -265,28 +277,18 @@ internal sealed class PwnedPasswordsDownloader : AsyncCommand<PwnedPasswordsDown
         return Convert.ToHexString(bytes)[3..];
     }
 
-    private async Task ProcessRanges(Settings settings)
+    private async Task ProcessRanges(Settings settings, CancellationToken cancellationToken)
     {
         if (settings.SingleFile)
         {
-            Channel<Task<Stream>> downloadTasks = Channel.CreateBounded<Task<Stream>>(new BoundedChannelOptions(settings.Parallelism) { SingleReader = true, SingleWriter = true, AllowSynchronousContinuations = true });
+            Channel<Task<DownloadedRange>> downloadTasks = Channel.CreateBounded<Task<DownloadedRange>>(new BoundedChannelOptions(settings.Parallelism) { SingleReader = true, SingleWriter = true, AllowSynchronousContinuations = true });
             await using FileStream file = File.Open($"{settings.OutputFile}.txt", new FileStreamOptions { Access = FileAccess.Write, BufferSize = 32767, Mode = FileMode.Create, Options = FileOptions.Asynchronous, Share = FileShare.None });
-            await using StreamWriter writer = new(file);
-            Task producerTask = StartDownloads(downloadTasks.Writer, settings.FetchNtlm);
-            await foreach (Task<Stream> item in downloadTasks.Reader.ReadAllAsync().ConfigureAwait(false))
+            Task producerTask = StartDownloads(downloadTasks.Writer, settings, cancellationToken);
+            await foreach (Task<DownloadedRange> item in downloadTasks.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
             {
-                string prefix = GetHashRange(_statistics.HashesDownloaded++);
-                await using Stream inputStream = await item.ConfigureAwait(false);
-                using StreamReader reader = new(inputStream);
-                while (await reader.ReadLineAsync() is { } line)
-                {
-                    if (line.Length > 0)
-                    {
-                        await writer.WriteLineAsync($"{prefix}{line}");
-                    }
-                }
-
-                await writer.FlushAsync();
+                DownloadedRange range = await item.ConfigureAwait(false);
+                await WriteRangeToSingleFile(range, file, settings.MaxRetries, cancellationToken).ConfigureAwait(false);
+                Interlocked.Increment(ref _statistics.HashesDownloaded);
             }
 
             await producerTask.ConfigureAwait(false);
@@ -296,10 +298,11 @@ internal sealed class PwnedPasswordsDownloader : AsyncCommand<PwnedPasswordsDown
             await Parallel.ForEachAsync(EnumerateRanges(), new ParallelOptions
             {
                 MaxDegreeOfParallelism = settings.Parallelism,
-                TaskScheduler = TaskScheduler.Default
+                TaskScheduler = TaskScheduler.Default,
+                CancellationToken = cancellationToken
             }, async (i, _) =>
             {
-                await DownloadRangeToFile(i, settings.OutputFile, settings.FetchNtlm).ConfigureAwait(false);
+                await DownloadRangeToFile(i, settings.OutputFile, settings.FetchNtlm, settings.MaxRetries, cancellationToken).ConfigureAwait(false);
             });
         }
     }
@@ -312,13 +315,13 @@ internal sealed class PwnedPasswordsDownloader : AsyncCommand<PwnedPasswordsDown
         }
     }
 
-    private async Task StartDownloads(ChannelWriter<Task<Stream>> channelWriter, bool fetchNtlm)
+    private async Task StartDownloads(ChannelWriter<Task<DownloadedRange>> channelWriter, Settings settings, CancellationToken cancellationToken)
     {
         try
         {
             foreach (int i in EnumerateRanges())
             {
-                await channelWriter.WriteAsync(GetPwnedPasswordsRangeFromWeb(i, fetchNtlm));
+                await channelWriter.WriteAsync(DownloadRangeToBuffer(i, settings.FetchNtlm, settings.MaxRetries, cancellationToken), cancellationToken).ConfigureAwait(false);
             }
 
             channelWriter.TryComplete();
@@ -329,13 +332,118 @@ internal sealed class PwnedPasswordsDownloader : AsyncCommand<PwnedPasswordsDown
         }
     }
 
-    private async Task DownloadRangeToFile(int currentHash, string outputDirectory, bool fetchNtlm)
+    private async Task<DownloadedRange> DownloadRangeToBuffer(int currentHash, bool fetchNtlm, int? maxRetries, CancellationToken cancellationToken)
     {
-        await using Stream stream = await GetPwnedPasswordsRangeFromWeb(currentHash, fetchNtlm).ConfigureAwait(false);
-        using SafeFileHandle handle = File.OpenHandle(Path.Combine(outputDirectory, $"{GetHashRange(currentHash)}.txt"), FileMode.Create, FileAccess.Write,
-            FileShare.None, FileOptions.Asynchronous);
-        await handle.CopyFrom(stream).ConfigureAwait(false);
+        string prefix = GetHashRange(currentHash);
+
+        return await ExecuteWithRetriesAsync(prefix, "downloading range data", maxRetries, async retryCancellationToken =>
+        {
+            await using MemoryStream output = new();
+            await using StreamWriter writer = new(output, Encoding.UTF8, leaveOpen: true);
+            using HttpResponseMessage response = await GetPwnedPasswordsRangeFromWeb(prefix, fetchNtlm, retryCancellationToken).ConfigureAwait(false);
+            await using Stream stream = await response.Content.ReadAsStreamAsync(retryCancellationToken).ConfigureAwait(false);
+            using StreamReader reader = new(stream);
+
+            while (await reader.ReadLineAsync(retryCancellationToken).ConfigureAwait(false) is { } line)
+            {
+                if (line.Length == 0)
+                {
+                    continue;
+                }
+
+                await writer.WriteAsync(prefix.AsMemory(), retryCancellationToken).ConfigureAwait(false);
+                await writer.WriteLineAsync(line.AsMemory(), retryCancellationToken).ConfigureAwait(false);
+            }
+
+            await writer.FlushAsync(retryCancellationToken).ConfigureAwait(false);
+            return new DownloadedRange(prefix, output.ToArray());
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task WriteRangeToSingleFile(DownloadedRange range, FileStream file, int? maxRetries, CancellationToken cancellationToken)
+    {
+        long startPosition = file.Position;
+
+        await ExecuteWithRetriesAsync(range.Prefix, "writing single-file output", maxRetries, async retryCancellationToken =>
+        {
+            file.Position = startPosition;
+            file.SetLength(startPosition);
+            await file.WriteAsync(range.Content, retryCancellationToken).ConfigureAwait(false);
+            await file.FlushAsync(retryCancellationToken).ConfigureAwait(false);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task DownloadRangeToFile(int currentHash, string outputDirectory, bool fetchNtlm, int? maxRetries, CancellationToken cancellationToken)
+    {
+        string prefix = GetHashRange(currentHash);
+
+        await ExecuteWithRetriesAsync(prefix, "downloading range file", maxRetries, async retryCancellationToken =>
+        {
+            using HttpResponseMessage response = await GetPwnedPasswordsRangeFromWeb(prefix, fetchNtlm, retryCancellationToken).ConfigureAwait(false);
+            await using Stream stream = await response.Content.ReadAsStreamAsync(retryCancellationToken).ConfigureAwait(false);
+            using SafeFileHandle handle = File.OpenHandle(Path.Combine(outputDirectory, $"{prefix}.txt"), FileMode.Create, FileAccess.Write, FileShare.None, FileOptions.Asynchronous);
+            await handle.CopyFrom(stream, cancellationToken: retryCancellationToken).ConfigureAwait(false);
+        }, cancellationToken).ConfigureAwait(false);
+
         Interlocked.Increment(ref _statistics.HashesDownloaded);
+    }
+
+    private static TimeSpan GetRetryDelay(int retryAttempt) => TimeSpan.FromSeconds(Math.Min(retryAttempt * s_retryDelay.TotalSeconds, s_maxRetryDelay.TotalSeconds));
+
+    private static void WriteRetryMessage(string prefix, string operation, int retryAttempt, int? maxRetries, TimeSpan delay, Exception exception)
+    {
+        string retryLimit = maxRetries is int boundedRetryCount ? $"/{boundedRetryCount}" : string.Empty;
+        string exceptionType = exception.GetType().Name.EscapeMarkup();
+        string exceptionMessage = exception.Message.EscapeMarkup();
+        AnsiConsole.MarkupLine($"[yellow]Retry {retryAttempt}{retryLimit} for prefix {prefix} in {delay.TotalSeconds:N0}s while {operation}. {exceptionType}: {exceptionMessage}[/]");
+    }
+
+    private static bool IsCancellation(Exception exception, CancellationToken cancellationToken) => exception is OperationCanceledException && cancellationToken.IsCancellationRequested;
+
+    private static async Task ExecuteWithRetriesAsync(string prefix, string operation, int? maxRetries, Func<CancellationToken, Task> work, CancellationToken cancellationToken)
+    {
+        await ExecuteWithRetriesAsync<object?>(prefix, operation, maxRetries, async retryCancellationToken =>
+        {
+            await work(retryCancellationToken).ConfigureAwait(false);
+            return null;
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<T> ExecuteWithRetriesAsync<T>(string prefix, string operation, int? maxRetries, Func<CancellationToken, Task<T>> work, CancellationToken cancellationToken)
+    {
+        int retryAttempt = 0;
+
+        while (true)
+        {
+            try
+            {
+                return await work(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (!IsCancellation(exception, cancellationToken))
+            {
+                if (maxRetries is int boundedRetryCount && retryAttempt >= boundedRetryCount)
+                {
+                    throw;
+                }
+
+                retryAttempt++;
+                TimeSpan delay = GetRetryDelay(retryAttempt);
+                WriteRetryMessage(prefix, operation, retryAttempt, maxRetries, delay, exception);
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private sealed class DownloadedRange
+    {
+        public DownloadedRange(string prefix, byte[] content)
+        {
+            Prefix = prefix;
+            Content = content;
+        }
+
+        public string Prefix { get; }
+        public byte[] Content { get; }
     }
 }
 
