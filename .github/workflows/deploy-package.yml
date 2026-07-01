@@ -8,6 +8,8 @@ jobs:
   build:
     name: "Build Project"
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # enable GitHub OIDC token issuance for this job
 
     env:
       MajorVersion: 0
@@ -15,6 +17,13 @@ jobs:
     steps:
     - uses: actions/checkout@v2
 
+    # Get a short-lived NuGet API key
+    - name: NuGet login (OIDC → temp API key)
+      uses: NuGet/login@v1
+      id: login
+      with:
+        user: ${{ secrets.NUGET_USER }}
+        
     - name: Get current date
       id: version
       run: echo "::set-output name=date::$(date +'%Y%m.%d')"
@@ -39,6 +48,7 @@ jobs:
 
     - name: Build Project
       run: dotnet pack ./src/HaveIBeenPwned.PwnedPasswords.Downloader/HaveIBeenPwned.PwnedPasswords.Downloader.csproj --configuration Release
-
-    - name: Publish Nuget to GitHub registry
-      run: dotnet nuget push ./src/HaveIBeenPwned.PwnedPasswords.Downloader/nupkg/*.nupkg -k ${{ secrets.NUGET_TOKEN }} --source https://api.nuget.org/v3/index.json --skip-duplicate --no-symbols 
+    
+    # Push the package
+    - name: NuGet push
+      run: dotnet nuget push  ./src/HaveIBeenPwned.PwnedPasswords.Downloader/nupkg/*.nupkg --api-key ${{steps.login.outputs.NUGET_API_KEY}} --source https://api.nuget.org/v3/index.json --skip-duplicate --no-symbols 
