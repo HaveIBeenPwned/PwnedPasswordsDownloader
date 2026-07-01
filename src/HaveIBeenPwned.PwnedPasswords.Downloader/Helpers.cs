@@ -31,23 +31,22 @@ namespace HaveIBeenPwned.PwnedPasswords
             }
         }
 
-        internal static async Task CopyFrom<T>(this SafeFileHandle handle, T stream, int offset = 0) where T : Stream
+        internal static async Task CopyFrom<T>(this SafeFileHandle handle, T stream, int offset = 0, CancellationToken cancellationToken = default) where T : Stream
         {
             Pipe pipe = GetPipe();
-            Task copyTask = stream.CopyToAsync(pipe.Writer).ContinueWith(CompleteWriter, pipe.Writer).Unwrap();
+            Task copyTask = stream.CopyToAsync(pipe.Writer, cancellationToken).ContinueWith(CompleteWriter, pipe.Writer).Unwrap();
 
             try
             {
                 while (true)
                 {
-                    if (!pipe.Reader.TryRead(out ReadResult result))
-                    {
-                        await pipe.Reader.ReadAsync().ConfigureAwait(false);
-                    }
+                    ReadResult result = pipe.Reader.TryRead(out ReadResult readResult)
+                        ? readResult
+                        : await pipe.Reader.ReadAsync(cancellationToken).ConfigureAwait(false);
 
                     foreach (ReadOnlyMemory<byte> item in result.Buffer)
                     {
-                        await RandomAccess.WriteAsync(handle, item, offset).ConfigureAwait(false);
+                        await RandomAccess.WriteAsync(handle, item, offset, cancellationToken).ConfigureAwait(false);
                         offset += item.Length;
                     }
 

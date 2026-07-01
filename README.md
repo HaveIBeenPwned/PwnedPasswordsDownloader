@@ -58,6 +58,7 @@ dotnet nuget add source https://api.nuget.org/v3/index.json -n nuget.org
 |-------------|---------------|-------------|
 | -s/--single | true | Determines whether to download hashes to a single file or as individual .txt files into another directory |
 | -p/--parallelism | Same as `Environment.ProcessorCount` | Determines how many hashes to download at a time |
+| --max-retries | Unlimited | Determines how many times each prefix is retried after a failure. Omit for unlimited retries, or pass `0` to disable retries. Retry delays increase per prefix up to 10 seconds. |
 | -o/--overwrite | false | Determines if output files should be overwritten or not |
 | -n | (none) | When set, the downloader fetches NTLM hashes instead of SHA1 |
 
@@ -66,3 +67,5 @@ dotnet nuget add source https://api.nuget.org/v3/index.json -n nuget.org
 `haveibeenpwned-downloader.exe hashes -s false -p 64`
 ## Download all hashes to a single txt file called `pwnedpasswords.txt` using 64 threads, overwriting the file if it already exists
 `haveibeenpwned-downloader.exe pwnedpasswords -o -p 64`
+## Download all hashes with at most 5 retries per prefix
+`haveibeenpwned-downloader.exe pwnedpasswords --max-retries 5`
