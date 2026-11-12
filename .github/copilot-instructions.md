@@ -1,28 +1,29 @@
 # Copilot instructions for PwnedPasswordsDownloader
 
-## Build, test, and lint commands
+## Build and test
 
-- Primary validation command: `dotnet pack .\src\HaveIBeenPwned.PwnedPasswords.Downloader\HaveIBeenPwned.PwnedPasswords.Downloader.csproj --configuration Release`
-- Local CLI smoke test: `dotnet run --project .\src\HaveIBeenPwned.PwnedPasswords.Downloader\HaveIBeenPwned.PwnedPasswords.Downloader.csproj --framework net9.0 -- --help`
-- The project multi-targets `net8.0` and `net9.0`, so `dotnet run` must include `--framework net8.0` or `--framework net9.0`.
-- There is currently no test project in the repository, so there is no full-suite or single-test command yet.
-- There is no repo-specific lint command configured; follow `src\.editorconfig` and use the normal .NET build/pack output as the main validation signal.
+- The project targets .NET 11; `global.json` selects the SDK and C# 15 is the default language version.
+- Run regression tests: `dotnet test src/HaveIBeenPwned.PwnedPasswords.Downloader.sln --configuration Release -p:PublishAot=false -p:PublishTrimmed=false`.
+- Smoke test the CLI: `dotnet run --project src/HaveIBeenPwned.PwnedPasswords.Downloader -- --help`.
+- Package a native tool: `dotnet pack src/HaveIBeenPwned.PwnedPasswords.Downloader --configuration Release --runtime <rid>`.
+- Package the framework-dependent fallback with `--runtime any -p:PublishAot=false`. For the pointer package, omit `--runtime` and set `-p:CreateRidSpecificToolPackages=false` so .NET 11 does not rebuild the runtime packages.
+- CI and deployment call `.github/workflows/test.yml` before packaging. Keep their SDK and package layout checks consistent with the project target.
 
-## High-level architecture
+## Architecture
 
-- This repository is a single packaged .NET CLI tool. The only product project is `src\HaveIBeenPwned.PwnedPasswords.Downloader\HaveIBeenPwned.PwnedPasswords.Downloader.csproj`, and CI validates it by packing the tool rather than building a larger solution graph.
-- `Program.cs` contains nearly all runtime behavior: it bootstraps a generic host, wires an `HttpClient` named `PwnedPasswords`, and runs a single Spectre.Console command class, `PwnedPasswordsDownloader`.
-- The downloader always iterates the full Pwned Passwords range space (`0` through `1024 * 1024 - 1`). `GetHashRange` converts each integer to the 5-character range prefix used by the HIBP range API, and single-file output reconstructs full hashes by prepending that prefix to every returned suffix line.
-- Networking is centralized around the named `HttpClient` plus a Polly resilience pipeline. Requests go to `https://api.pwnedpasswords.com/range/`, use HTTP/2 when available, retry failures up to 10 times, and track Cloudflare cache-hit metrics in `Statistics`.
-- Output has two distinct write paths. `ProcessRanges` either:
-  - streams all ranges through a bounded `Channel<Task<Stream>>` into one `outputFile.txt`, preserving range order, or
-  - downloads each range directly to its own `xxxxx.txt` file with `Parallel.ForEachAsync`.
-- `Helpers.CopyFrom` is the custom high-throughput file-writing primitive for per-range files. It copies the HTTP response stream into a pooled `Pipe` and writes buffers with `RandomAccess.WriteAsync` on a `SafeFileHandle`; reuse that path if you change direct-to-file downloads.
+- `Program.cs` contains command parsing, HTTP setup, progress, retries, verification, and both download paths.
+- `RangeIndex.cs` stores ETags and atomically saves a prefix-sorted index for conditional directory downloads.
+- All 1,048,576 five-character uppercase hexadecimal prefixes are downloaded. NTLM requests add `?mode=ntlm`.
+- Directory mode uses `Parallel.ForEachAsync`. Honor the loop-provided cancellation token so a failing worker stops its siblings.
+- Single-file mode uses a bounded window of download tasks, writes in prefix order, and joins all outstanding work on failure/cancellation.
+- MD5 is an API-provided content-integrity check. Hash while copying with asynchronous I/O; do not reread asynchronous file handles synchronously.
+- Replace directory range files only after verification succeeds. Keep index entries consistent with accepted files.
+- Explicit `HttpRequestMessage` instances must copy the client's HTTP version and version policy before `SendAsync`.
 
-## Key conventions
+## Conventions
 
-- Most logic lives in `Program.cs`, including the command settings, downloader implementation, host registration, and DI bridge types. Do not assume this repo follows a many-files-per-type layout.
-- User-facing behavior is intentionally surfaced through Spectre.Console output instead of logging providers. `Program.cs` clears default host logging and reports retries, failures, progress, and final statistics through `AnsiConsole`.
-- Existing output safety checks are part of the command contract: single-file mode refuses to overwrite `outputFile.txt` unless `-o` is set, and directory mode refuses to write into a non-empty directory unless `-o` is set.
-- Keep the packaging layout intact when editing the project file: the NuGet tool package embeds the repository `README.md` and `.github\images\hibp.png`, and the command name is `haveibeenpwned-downloader`.
-- Follow `src\.editorconfig` conventions when editing C#: explicit types are preferred over `var` unless the type is obvious, private/internal fields use `_camelCase`, private/internal static fields use `s_` prefixes, and braces stay on new lines.
+- Preserve output guards: existing single files require `-o`; nonempty directories without an index require `-o` or `--force`. Refusal returns a nonzero exit code without success statistics.
+- Use Spectre.Console for user-facing output and escape interpolated paths and exception messages with `EscapeMarkup()`.
+- Follow `src/.editorconfig`. Keep asynchronous operations cancellable and await owned work before disposing resources.
+- Tests use simulated HTTP responses and temporary directories; they must not download the live corpus.
+- Preserve Native AOT tool packaging, the `haveibeenpwned-downloader` command, and the embedded README/icon.

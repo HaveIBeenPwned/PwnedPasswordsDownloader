@@ -1,11 +1,11 @@
-using System.Buffers.Binary;
+using System.Buffers;
 using System.CommandLine;
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
-using System.Threading.Channels;
 using Spectre.Console;
 
 try
@@ -137,6 +137,8 @@ static RootCommand CreateRootCommand(PwnedPasswordsDownloader downloader)
 
 internal sealed class Statistics
 {
+    private int _highestCompletedRange = -1;
+
     public int HashesDownloaded;
     public int CloudflareRequests;
     public int CloudflareHits;
@@ -147,7 +149,25 @@ internal sealed class Statistics
     public int ModifiedRanges;
     public int IndexEntries;
     public long ElapsedMilliseconds;
-    public double HashesPerSecond => HashesDownloaded / (ElapsedMilliseconds / 1000.0);
+    public int HighestCompletedRange => Volatile.Read(ref _highestCompletedRange);
+    public double HashesPerSecond => ElapsedMilliseconds > 0 ? HashesDownloaded * 1000.0 / ElapsedMilliseconds : 0;
+
+    public void RecordCompletedRange(int range)
+    {
+        var highest = HighestCompletedRange;
+        while (range > highest)
+        {
+            var observed = Interlocked.CompareExchange(ref _highestCompletedRange, range, highest);
+            if (observed == highest)
+            {
+                break;
+            }
+
+            highest = observed;
+        }
+
+        Interlocked.Increment(ref HashesDownloaded);
+    }
 }
 
 internal static class ConsoleExceptionWriter
@@ -158,12 +178,13 @@ internal static class ConsoleExceptionWriter
 
 internal sealed class PwnedPasswordsDownloader(HttpClient httpClient)
 {
+    private const int RangeCount = 1024 * 1024;
     private static readonly TimeSpan _retryDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan _maxRetryDelay = TimeSpan.FromSeconds(10);
     private readonly Statistics _statistics = new();
     private readonly HttpClient _httpClient = httpClient;
 
-    public sealed class Settings
+    public sealed record Settings
     {
         public string OutputFile { get; init; } = "pwnedpasswords";
         public int Parallelism { get; init; }
@@ -178,15 +199,9 @@ internal sealed class PwnedPasswordsDownloader(HttpClient httpClient)
     {
         if (settings.Parallelism < 2)
         {
-            settings = new Settings
+            settings = settings with
             {
-                OutputFile = settings.OutputFile,
-                Parallelism = Math.Max(Environment.ProcessorCount * 8, 2),
-                Overwrite = settings.Overwrite,
-                SingleFile = settings.SingleFile,
-                FetchNtlm = settings.FetchNtlm,
-                MaxRetries = settings.MaxRetries,
-                Force = settings.Force
+                Parallelism = Math.Max(Environment.ProcessorCount * 8, 2)
             };
         }
 
@@ -201,6 +216,25 @@ internal sealed class PwnedPasswordsDownloader(HttpClient httpClient)
 
         try
         {
+            if (settings.SingleFile)
+            {
+                if (!settings.Overwrite && File.Exists($"{settings.OutputFile}.txt"))
+                {
+                    AnsiConsole.MarkupLine($"Output file {settings.OutputFile.EscapeMarkup()}.txt already exists. Use -o if you want to overwrite it.");
+                    return 1;
+                }
+            }
+            else
+            {
+                Directory.CreateDirectory(settings.OutputFile);
+                var indexPath = GetIndexPath(settings.OutputFile, settings.FetchNtlm);
+                if (!settings.Overwrite && !settings.Force && !File.Exists(indexPath) && Directory.EnumerateFiles(settings.OutputFile).Any())
+                {
+                    AnsiConsole.MarkupLine($"Output directory {settings.OutputFile.EscapeMarkup()} already exists and is not empty. Use -o if you want to overwrite files.");
+                    return 1;
+                }
+            }
+
             await AnsiConsole.Progress()
                 .AutoRefresh(false) // Turn off auto refresh
                 .AutoClear(false)   // Do not remove the task list when done
@@ -208,47 +242,21 @@ internal sealed class PwnedPasswordsDownloader(HttpClient httpClient)
                 .Columns(new TaskDescriptionColumn(), new ProgressBarColumn(), new PercentageColumn(), new RemainingTimeColumn(), new SpinnerColumn())
                 .StartAsync(async ctx =>
                 {
-                    if (settings.SingleFile)
-                    {
-                        if (File.Exists($"{settings.OutputFile}.txt"))
-                        {
-                            if (!settings.Overwrite)
-                            {
-                                AnsiConsole.MarkupLine($"Output file {settings.OutputFile.EscapeMarkup()}.txt already exists. Use -o if you want to overwrite it.");
-                                return;
-                            }
-
-                            File.Delete($"{settings.OutputFile}.txt");
-                        }
-                    }
-                    else
-                    {
-                        if (!Directory.Exists(settings.OutputFile))
-                        {
-                            Directory.CreateDirectory(settings.OutputFile);
-                        }
-
-                        var indexPath = GetIndexPath(settings.OutputFile, settings.FetchNtlm);
-                        var indexExists = File.Exists(indexPath);
-                        if (!settings.Overwrite && !settings.Force && !indexExists && Directory.EnumerateFiles(settings.OutputFile).Any())
-                        {
-                            AnsiConsole.MarkupLine($"Output directory {settings.OutputFile.EscapeMarkup()} already exists and is not empty. Use -o if you want to overwrite files.");
-                            return;
-                        }
-                    }
-
                     RangeIndex? index = settings.SingleFile
                         ? null
                         : await RangeIndex.LoadAsync(GetIndexPath(settings.OutputFile, settings.FetchNtlm), settings.Force, cancellationTokenSource.Token).ConfigureAwait(false);
                     var timer = Stopwatch.StartNew();
-                    var progressTask = ctx.AddTask("[green]Hash ranges processed[/]", true, 1024 * 1024);
+                    var progressTask = ctx.AddTask(GetProgressDescription(), true, RangeCount);
                     var processTask = ProcessRanges(settings, index, cancellationTokenSource.Token);
 
                     do
                     {
                         progressTask.Value = _statistics.HashesDownloaded;
+                        progressTask.Description = GetProgressDescription();
                         ctx.Refresh();
-                        await Task.Delay(100, cancellationTokenSource.Token).ConfigureAwait(false);
+                        // Always join ProcessRanges, even when cancellation interrupts the download.
+                        // It owns the outstanding I/O and must finish before HttpClient is disposed.
+                        await Task.WhenAny(processTask, Task.Delay(100)).ConfigureAwait(false);
                     }
                     while (!processTask.IsCompleted);
 
@@ -261,6 +269,7 @@ internal sealed class PwnedPasswordsDownloader(HttpClient httpClient)
 
                     _statistics.ElapsedMilliseconds = timer.ElapsedMilliseconds;
                     progressTask.Value = _statistics.HashesDownloaded;
+                    progressTask.Description = GetProgressDescription();
                     ctx.Refresh();
                     progressTask.StopTask();
                 });
@@ -284,7 +293,7 @@ internal sealed class PwnedPasswordsDownloader(HttpClient httpClient)
         }
         catch (Exception e)
         {
-            AnsiConsole.MarkupLine($"Failed to download hash ranges: {e.Message}");
+            AnsiConsole.MarkupLine($"Failed to download hash ranges: {e.Message.EscapeMarkup()}");
             ConsoleExceptionWriter.Write(e);
 
             return -1;
@@ -304,7 +313,11 @@ internal sealed class PwnedPasswordsDownloader(HttpClient httpClient)
             requestUri += "?mode=ntlm";
         }
 
-        using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
+        using var request = new HttpRequestMessage(HttpMethod.Get, requestUri)
+        {
+            Version = _httpClient.DefaultRequestVersion,
+            VersionPolicy = _httpClient.DefaultVersionPolicy
+        };
         if (etag != null)
         {
             request.Headers.IfNoneMatch.Add(EntityTagHeaderValue.Parse(etag));
@@ -356,12 +369,14 @@ internal sealed class PwnedPasswordsDownloader(HttpClient httpClient)
         }
     }
 
-    private static string GetHashRange(int i)
+    private string GetProgressDescription()
     {
-        Span<byte> bytes = stackalloc byte[4];
-        BinaryPrimitives.WriteInt32BigEndian(bytes, i);
-        return Convert.ToHexString(bytes)[3..];
+        var highest = _statistics.HighestCompletedRange;
+        var prefix = highest < 0 ? "-----" : GetHashRange(highest);
+        return $"[green]Hash ranges processed [[{prefix}/FFFFF]][/]";
     }
+
+    private static string GetHashRange(int i) => i.ToString("X5", CultureInfo.InvariantCulture);
 
     private static string GetIndexPath(string outputDirectory, bool fetchNtlm) =>
         Path.Combine(outputDirectory, fetchNtlm ? "ntlm.index" : "sha1.index");
@@ -370,46 +385,54 @@ internal sealed class PwnedPasswordsDownloader(HttpClient httpClient)
     {
         if (settings.SingleFile)
         {
-            var downloadTasks = Channel.CreateBounded<Task<DownloadedRange>>(new BoundedChannelOptions(settings.Parallelism) { SingleReader = true, SingleWriter = true, AllowSynchronousContinuations = true });
-            await using var file = File.Open($"{settings.OutputFile}.txt", new FileStreamOptions { Access = FileAccess.Write, BufferSize = 32767, Mode = FileMode.Create, Options = FileOptions.Asynchronous, Share = FileShare.None });
-            var producerTask = StartDownloads(downloadTasks.Writer, settings, cancellationToken);
-            await foreach (var item in downloadTasks.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+            using var downloadCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            await using var file = File.Open($"{settings.OutputFile}.txt", new FileStreamOptions { Access = FileAccess.Write, BufferSize = 32768, Mode = settings.Overwrite ? FileMode.Create : FileMode.CreateNew, Options = FileOptions.Asynchronous, Share = FileShare.None });
+            // A fixed window preserves prefix order without a separate producer or abandoned tasks.
+            List<Task<DownloadedRange>> downloads = [with(capacity: Math.Min(settings.Parallelism, RangeCount))];
+            var nextRange = 0;
+            try
             {
-                var range = await item.ConfigureAwait(false);
-                await WriteRangeToSingleFile(range, file, settings.MaxRetries, cancellationToken).ConfigureAwait(false);
-                Interlocked.Increment(ref _statistics.HashesDownloaded);
-            }
+                while (nextRange < Math.Min(settings.Parallelism, RangeCount))
+                {
+                    downloads.Add(DownloadRangeToBuffer(nextRange++, settings.FetchNtlm, settings.MaxRetries, downloadCancellation.Token));
+                }
 
-            await producerTask.ConfigureAwait(false);
+                for (var i = 0; i < RangeCount; i++)
+                {
+                    var slot = i % downloads.Count;
+                    var range = await downloads[slot].ConfigureAwait(false);
+                    await WriteRangeToSingleFile(range, file, settings.MaxRetries, cancellationToken).ConfigureAwait(false);
+                    _statistics.RecordCompletedRange(i);
+                    if (nextRange < RangeCount)
+                    {
+                        downloads[slot] = DownloadRangeToBuffer(nextRange++, settings.FetchNtlm, settings.MaxRetries, downloadCancellation.Token);
+                    }
+                }
+            }
+            finally
+            {
+                await downloadCancellation.CancelAsync().ConfigureAwait(false);
+                try
+                {
+                    await Task.WhenAll(downloads).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Observe all prefetched failures while preserving the original failure/cancellation.
+                }
+            }
         }
         else
         {
-            await Parallel.ForEachAsync(Enumerable.Range(0, 1024 * 1024), new ParallelOptions
+            await Parallel.ForEachAsync(Enumerable.Range(0, RangeCount), new ParallelOptions
             {
                 MaxDegreeOfParallelism = settings.Parallelism,
                 TaskScheduler = TaskScheduler.Default,
                 CancellationToken = cancellationToken
-            }, async (i, _) =>
+            }, async (i, rangeCancellationToken) =>
             {
-                await DownloadRangeToFile(i, settings.OutputFile, settings.FetchNtlm, settings.MaxRetries, index, cancellationToken).ConfigureAwait(false);
+                await DownloadRangeToFile(i, settings.OutputFile, settings.FetchNtlm, settings.MaxRetries, index, rangeCancellationToken).ConfigureAwait(false);
             });
-        }
-    }
-
-    private async Task StartDownloads(ChannelWriter<Task<DownloadedRange>> channelWriter, Settings settings, CancellationToken cancellationToken)
-    {
-        try
-        {
-            foreach (var i in Enumerable.Range(0, 1024 * 1024))
-            {
-                await channelWriter.WriteAsync(DownloadRangeToBuffer(i, settings.FetchNtlm, settings.MaxRetries, cancellationToken), cancellationToken).ConfigureAwait(false);
-            }
-
-            channelWriter.TryComplete();
-        }
-        catch (Exception e)
-        {
-            channelWriter.TryComplete(e);
         }
     }
 
@@ -423,13 +446,10 @@ internal sealed class PwnedPasswordsDownloader(HttpClient httpClient)
             var expectedContentMd5 = GetContentMd5(prefix, response);
             await using var stream = await response.Content.ReadAsStreamAsync(retryCancellationToken).ConfigureAwait(false);
             await using MemoryStream responseContent = new();
-            await stream.CopyToAsync(responseContent, retryCancellationToken).ConfigureAwait(false);
-            responseContent.Seek(0, SeekOrigin.Begin);
-            ValidateContentMd5(expectedContentMd5, MD5.HashData(responseContent));
-            responseContent.Seek(0, SeekOrigin.Begin);
+            await CopyAndVerifyAsync(stream, responseContent, expectedContentMd5, retryCancellationToken).ConfigureAwait(false);
             await using MemoryStream output = new();
-            await using StreamWriter writer = new(output, Encoding.UTF8, leaveOpen: true);
-            using StreamReader reader = new(responseContent);
+            await using StreamWriter writer = new(output, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), leaveOpen: true);
+            using StreamReader reader = new(new ReadOnlyMemoryStream(responseContent.GetBuffer().AsMemory(0, checked((int)responseContent.Length))));
 
             while (await reader.ReadLineAsync(retryCancellationToken).ConfigureAwait(false) is { } line)
             {
@@ -443,7 +463,7 @@ internal sealed class PwnedPasswordsDownloader(HttpClient httpClient)
             }
 
             await writer.FlushAsync(retryCancellationToken).ConfigureAwait(false);
-            return new DownloadedRange(prefix, output.ToArray());
+            return new DownloadedRange(prefix, output.GetBuffer().AsMemory(0, checked((int)output.Length)));
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -460,11 +480,12 @@ internal sealed class PwnedPasswordsDownloader(HttpClient httpClient)
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task DownloadRangeToFile(int currentHash, string outputDirectory, bool fetchNtlm, int? maxRetries, RangeIndex? index, CancellationToken cancellationToken)
+    internal async Task DownloadRangeToFile(int currentHash, string outputDirectory, bool fetchNtlm, int? maxRetries, RangeIndex? index, CancellationToken cancellationToken)
     {
         var prefix = GetHashRange(currentHash);
         var outputPath = Path.Combine(outputDirectory, $"{prefix}.txt");
-        var etag = index != null && File.Exists(outputPath) && index.TryGet(prefix, out var savedEtag)
+        // Fresh downloads have no saved ETag, so avoid a filesystem lookup for every new range.
+        var etag = index != null && index.TryGet(prefix, out var savedEtag) && File.Exists(outputPath)
             ? savedEtag
             : null;
 
@@ -478,12 +499,21 @@ internal sealed class PwnedPasswordsDownloader(HttpClient httpClient)
 
             var expectedContentMd5 = GetContentMd5(prefix, response);
             await using var stream = await response.Content.ReadAsStreamAsync(retryCancellationToken).ConfigureAwait(false);
-            await using (var file = File.Open(outputPath, new FileStreamOptions { Mode = FileMode.Create, Access = FileAccess.ReadWrite, Share = FileShare.None, BufferSize = 32767, Options = FileOptions.Asynchronous }))
+            var temporaryPath = Path.Combine(outputDirectory, $".{prefix}.{Guid.NewGuid():N}.tmp");
+            try
             {
-                await stream.CopyToAsync(file, retryCancellationToken).ConfigureAwait(false);
-                await file.FlushAsync(retryCancellationToken).ConfigureAwait(false);
-                file.Seek(0, SeekOrigin.Begin);
-                ValidateContentMd5(expectedContentMd5, MD5.HashData(file));
+                await using (var file = File.Open(temporaryPath, new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None, BufferSize = 32768, Options = FileOptions.Asynchronous }))
+                {
+                    await CopyAndVerifyAsync(stream, file, expectedContentMd5, retryCancellationToken).ConfigureAwait(false);
+                }
+
+                File.Move(temporaryPath, outputPath, overwrite: true);
+            }
+            catch
+            {
+                // A successful move already removed the temporary path. Only failed attempts need cleanup.
+                File.Delete(temporaryPath);
+                throw;
             }
 
             if (index != null)
@@ -501,7 +531,7 @@ internal sealed class PwnedPasswordsDownloader(HttpClient httpClient)
             }
         }, cancellationToken).ConfigureAwait(false);
 
-        Interlocked.Increment(ref _statistics.HashesDownloaded);
+        _statistics.RecordCompletedRange(currentHash);
     }
 
     private static byte[] GetContentMd5(string prefix, HttpResponseMessage response)
@@ -513,6 +543,28 @@ internal sealed class PwnedPasswordsDownloader(HttpClient httpClient)
 
         AnsiConsole.MarkupLine($"[yellow]Response for prefix {prefix} did not contain a Content-MD5 header. The range cannot be verified.[/]");
         throw new InvalidDataException("Response did not contain a Content-MD5 header.");
+    }
+
+    internal static async Task CopyAndVerifyAsync(Stream source, Stream destination, byte[] expectedHash, CancellationToken cancellationToken)
+    {
+        // Hash the bytes as they arrive: no second pass and no synchronous reads on an async file handle.
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
+        var buffer = ArrayPool<byte>.Shared.Rent(32768);
+        try
+        {
+            int bytesRead;
+            while ((bytesRead = await source.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false)) != 0)
+            {
+                hash.AppendData(buffer.AsSpan(0, bytesRead));
+                await destination.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken).ConfigureAwait(false);
+            }
+
+            ValidateContentMd5(expectedHash, hash.GetHashAndReset());
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 
     private static void ValidateContentMd5(ReadOnlySpan<byte> expectedHash, ReadOnlySpan<byte> actualHash)
@@ -569,9 +621,5 @@ internal sealed class PwnedPasswordsDownloader(HttpClient httpClient)
         }
     }
 
-    private sealed class DownloadedRange(string prefix, byte[] content)
-    {
-        public string Prefix { get; } = prefix;
-        public byte[] Content { get; } = content;
-    }
+    private sealed record DownloadedRange(string Prefix, ReadOnlyMemory<byte> Content);
 }

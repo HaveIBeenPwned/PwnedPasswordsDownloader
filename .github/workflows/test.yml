@@ -1,0 +1,25 @@
+name: Regression tests
+
+on:
+  workflow_call:
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-14]
+    steps:
+    - uses: actions/checkout@v7
+    - name: Setup .NET SDK
+      uses: actions/setup-dotnet@v6
+      with:
+        global-json-file: global.json
+    - name: Run regression tests
+      run: >
+        dotnet test ./src/HaveIBeenPwned.PwnedPasswords.Downloader.Tests/HaveIBeenPwned.PwnedPasswords.Downloader.Tests.csproj
+        --configuration Release
+        -p:PublishAot=false
+        -p:PublishTrimmed=false

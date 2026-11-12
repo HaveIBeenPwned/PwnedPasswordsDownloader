@@ -7,13 +7,16 @@ on:
     branches: [ main ]
 
 jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
   version:
     name: "Set package version"
     runs-on: ubuntu-latest
 
     env:
       MajorVersion: 0
-      MinorVersion: 5
+      MinorVersion: 6
 
     outputs:
       version-prefix: ${{ steps.version.outputs.version-prefix }}
@@ -25,7 +28,7 @@ jobs:
 
   package-rid:
     name: "Package Native AOT (${{ matrix.rid }})"
-    needs: version
+    needs: [version, test]
     runs-on: ${{ matrix.os }}
 
     env:
@@ -50,10 +53,10 @@ jobs:
     steps:
     - uses: actions/checkout@v7
 
-    - name: Setup .NET 10.0 SDK
+    - name: Setup .NET 11.0 SDK
       uses: actions/setup-dotnet@v6
       with:
-        dotnet-version: 10.x
+        global-json-file: global.json
 
     - name: Package Native AOT tool
       shell: pwsh
@@ -66,21 +69,10 @@ jobs:
 
     - name: Validate RID-specific package
       shell: pwsh
-      run: |
-        $packages = @(Get-ChildItem "$env:GITHUB_WORKSPACE/packages" -File -Filter "*.$env:RID.*.nupkg")
-        if ($packages.Count -ne 1) {
-          throw "Expected exactly one $env:RID Native AOT package, found $($packages.Count)."
-        }
-
-        $archive = [System.IO.Compression.ZipFile]::OpenRead($packages[0].FullName)
-        try {
-          if (-not ($archive.Entries | Where-Object FullName -like 'tools/*')) {
-            throw "The $env:RID package does not contain tool payload files."
-          }
-        }
-        finally {
-          $archive.Dispose()
-        }
+      run: >
+        ./.github/scripts/Test-ToolPackage.ps1
+        -PackageDirectory "$env:GITHUB_WORKSPACE/packages"
+        -RuntimeIdentifier $env:RID
 
     - name: Upload RID-specific package
       uses: actions/upload-artifact@v7
@@ -91,7 +83,7 @@ jobs:
 
   package-pointer:
     name: "Package fallback and tool pointer"
-    needs: version
+    needs: [version, test]
     runs-on: ubuntu-latest
 
     env:
@@ -100,10 +92,10 @@ jobs:
     steps:
     - uses: actions/checkout@v7
 
-    - name: Setup .NET 10.0 SDK
+    - name: Setup .NET 11.0 SDK
       uses: actions/setup-dotnet@v6
       with:
-        dotnet-version: 10.x
+        global-json-file: global.json
 
     - name: Package framework-dependent fallback
       run: >
@@ -118,12 +110,13 @@ jobs:
       run: |
         package="${GITHUB_WORKSPACE}/fallback-package/haveibeenpwned-downloader.any.${VersionPrefix}.nupkg"
         test -f "${package}"
-        unzip -Z1 "${package}" | grep -Fx 'tools/net10.0/any/haveibeenpwned-downloader.dll'
+        unzip -Z1 "${package}" | grep -Fx 'tools/net11.0/any/haveibeenpwned-downloader.dll'
 
     - name: Package tool pointer
       run: >
         dotnet pack ./src/HaveIBeenPwned.PwnedPasswords.Downloader/HaveIBeenPwned.PwnedPasswords.Downloader.csproj
         --configuration Release
+        -p:CreateRidSpecificToolPackages=false
         -p:VersionPrefix="${VersionPrefix}"
         -p:PackageOutputPath="${GITHUB_WORKSPACE}/pointer-package"
 
