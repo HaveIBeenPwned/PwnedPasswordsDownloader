@@ -29,11 +29,11 @@ finally {
 }
 
 $executableName = if ($IsWindows) { 'haveibeenpwned-downloader.exe' } else { 'haveibeenpwned-downloader' }
-$executables = @(Get-ChildItem -LiteralPath $smokeDirectory -Recurse -File -Filter $executableName)
-if ($executables.Count -ne 1) {
-    throw "Expected exactly one native executable, found $($executables.Count)."
+# macOS .dSYM bundles contain a same-named DWARF file; only run the tool payload.
+$executable = Join-Path $smokeDirectory "tools/any/$RuntimeIdentifier/$executableName"
+if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+    throw "Native executable is missing from the $RuntimeIdentifier tool payload: $executable"
 }
-$executable = $executables[0].FullName
 if (-not $IsWindows) {
     & chmod +x $executable
     if ($LASTEXITCODE -ne 0) { throw 'Could not mark the native executable as executable.' }
